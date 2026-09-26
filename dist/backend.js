@@ -1,12 +1,13 @@
 // src/core.ts
 var DEFAULT_TEMPLATE = "[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]";
-var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true };
+var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true, integrateComposer: false };
 function normalizeSettings(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     version: 2,
     template: typeof v.template === "string" ? v.template : DEFAULT_TEMPLATE,
-    clearInput: v.clearInput !== false
+    clearInput: v.clearInput !== false,
+    integrateComposer: v.integrateComposer === true
   };
 }
 function renderTemplate(template, input) {

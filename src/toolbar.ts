@@ -1,8 +1,9 @@
+import { GUIDE_ICON, SIMPLE_ICON } from './action-icons'
 import { composer } from './composer'
 
 // Like Saucepan's toolbar, this lives directly before InputArea's input row.
 // Keep the host DOM dependency here; never move or replace React-owned nodes.
-export function mountGuideToolbar(onClick: () => void, onSimpleSend: () => void, state: () => { ready: boolean; busy: boolean; drafts: number }, onRecover: () => void) {
+export function mountGuideToolbar(onClick: () => void, onSimpleSend: () => void, state: () => { ready: boolean; busy: boolean; drafts: number; integrated: boolean }, onRecover: () => void, refreshActions: () => void) {
   const toolbar = document.createElement('div')
   toolbar.id = 'sd-guide-toolbar'
   const style = document.createElement('style')
@@ -31,12 +32,12 @@ export function mountGuideToolbar(onClick: () => void, onSimpleSend: () => void,
   button.type = 'button'
   button.setAttribute('aria-label', 'Guide Response')
   // Inline clapperboard icon, styled with the host theme's current text color.
-  button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m4 11 16-4-1-4L3 7l1 4Z"/><path d="m8 6 3 4m3-6 3 4M4 11v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M4 14h16"/></svg>'
+  button.innerHTML = GUIDE_ICON
   button.addEventListener('click', onClick)
   const simple = document.createElement('button')
   simple.type = 'button'
   simple.setAttribute('aria-label', 'Simple Send')
-  simple.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9H13"/><path d="M19 2v6m-3-3h6"/></svg>'
+  simple.innerHTML = SIMPLE_ICON
   simple.addEventListener('click', onSimpleSend)
   const recovery = document.createElement('button')
   recovery.type = 'button'
@@ -49,13 +50,20 @@ export function mountGuideToolbar(onClick: () => void, onSimpleSend: () => void,
 
   function refresh() {
     if (disposed) return
+    refreshActions()
+    const { ready, busy, drafts, integrated } = state()
+    if (button.hidden !== integrated) button.hidden = integrated
+    if (simple.hidden !== integrated) simple.hidden = integrated
+    const actionDisplay = integrated ? 'none' : 'inline-flex'
+    if (button.style.display !== actionDisplay) button.style.display = actionDisplay
+    if (simple.style.display !== actionDisplay) simple.style.display = actionDisplay
+    if (integrated && !drafts) { toolbar.remove(); return }
     let current: ReturnType<typeof composer>
     try { current = composer() } catch { toolbar.remove(); return }
     const area = current.input.closest('[data-component="InputArea"]')
     const row = current.input.parentElement?.parentElement
     if (!area || !row || row.parentElement !== area) { toolbar.remove(); return }
     if (toolbar.parentElement !== area || toolbar.nextElementSibling !== row) area.insertBefore(toolbar, row)
-    const { ready, busy, drafts } = state()
     if (recovery.hidden !== !drafts) recovery.hidden = !drafts
     const recoveryDisplay = drafts ? 'inline-flex' : 'none'
     if (recovery.style.display !== recoveryDisplay) recovery.style.display = recoveryDisplay

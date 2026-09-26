@@ -1,12 +1,13 @@
 // src/core.ts
 var DEFAULT_TEMPLATE = "[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]";
-var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true };
+var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true, integrateComposer: false };
 function normalizeSettings(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     version: 2,
     template: typeof v.template === "string" ? v.template : DEFAULT_TEMPLATE,
-    clearInput: v.clearInput !== false
+    clearInput: v.clearInput !== false,
+    integrateComposer: v.integrateComposer === true
   };
 }
 
@@ -41,8 +42,12 @@ async function waitForEmptyComposer(input, draftLabel) {
   return freshReplyButton(input, draftLabel);
 }
 
+// src/action-icons.ts
+var GUIDE_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m4 11 16-4-1-4L3 7l1 4Z"/><path d="m8 6 3 4m3-6 3 4M4 11v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M4 14h16"/></svg>';
+var SIMPLE_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9H13"/><path d="M19 2v6m-3-3h6"/></svg>';
+
 // src/toolbar.ts
-function mountGuideToolbar(onClick, onSimpleSend, state, onRecover) {
+function mountGuideToolbar(onClick, onSimpleSend, state, onRecover, refreshActions) {
   const toolbar = document.createElement("div");
   toolbar.id = "sd-guide-toolbar";
   const style = document.createElement("style");
@@ -70,12 +75,12 @@ function mountGuideToolbar(onClick, onSimpleSend, state, onRecover) {
   const button = document.createElement("button");
   button.type = "button";
   button.setAttribute("aria-label", "Guide Response");
-  button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m4 11 16-4-1-4L3 7l1 4Z"/><path d="m8 6 3 4m3-6 3 4M4 11v9a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7M4 14h16"/></svg>';
+  button.innerHTML = GUIDE_ICON;
   button.addEventListener("click", onClick);
   const simple = document.createElement("button");
   simple.type = "button";
   simple.setAttribute("aria-label", "Simple Send");
-  simple.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9H13"/><path d="M19 2v6m-3-3h6"/></svg>';
+  simple.innerHTML = SIMPLE_ICON;
   simple.addEventListener("click", onSimpleSend);
   const recovery = document.createElement("button");
   recovery.type = "button";
@@ -87,6 +92,17 @@ function mountGuideToolbar(onClick, onSimpleSend, state, onRecover) {
   let disposed = false;
   function refresh() {
     if (disposed) return;
+    refreshActions();
+    const { ready, busy, drafts, integrated } = state();
+    if (button.hidden !== integrated) button.hidden = integrated;
+    if (simple.hidden !== integrated) simple.hidden = integrated;
+    const actionDisplay = integrated ? "none" : "inline-flex";
+    if (button.style.display !== actionDisplay) button.style.display = actionDisplay;
+    if (simple.style.display !== actionDisplay) simple.style.display = actionDisplay;
+    if (integrated && !drafts) {
+      toolbar.remove();
+      return;
+    }
     let current;
     try {
       current = composer();
@@ -101,7 +117,6 @@ function mountGuideToolbar(onClick, onSimpleSend, state, onRecover) {
       return;
     }
     if (toolbar.parentElement !== area || toolbar.nextElementSibling !== row) area.insertBefore(toolbar, row);
-    const { ready, busy, drafts } = state();
     if (recovery.hidden !== !drafts) recovery.hidden = !drafts;
     const recoveryDisplay = drafts ? "inline-flex" : "none";
     if (recovery.style.display !== recoveryDisplay) recovery.style.display = recoveryDisplay;
@@ -336,6 +351,143 @@ function draftRecovery(ctx, changed) {
   };
 }
 
+// src/composer-actions.ts
+function composerActions(ctx, state, guide, simple) {
+  let handles = [];
+  let enabled = [];
+  let disposed = false;
+  function allowed(index) {
+    if (disposed || handles.length !== 2) return false;
+    const { ready, busy } = state();
+    try {
+      const current = composer();
+      return !busy && (index !== 0 || ready) && Boolean(current.send && current.input.value.trim());
+    } catch {
+      return false;
+    }
+  }
+  function remove() {
+    const previous = handles;
+    handles = [];
+    enabled = [];
+    for (const handle of previous) handle.destroy();
+  }
+  return {
+    active: () => handles.length === 2,
+    setActive(active) {
+      if (disposed || active === (handles.length === 2)) return;
+      if (!active) {
+        remove();
+        return;
+      }
+      try {
+        for (const [index, action] of [
+          { id: "scene_direction.guide", label: "Guide Response", subtitle: "Use the draft as a temporary scene direction for the next reply.", iconSvg: GUIDE_ICON },
+          { id: "scene_direction.simple_send", label: "Simple Send", subtitle: "Save the draft as a user message without generating a reply.", iconSvg: SIMPLE_ICON }
+        ].entries()) {
+          const handle = ctx.ui.registerInputBarAction({ ...action, enabled: false });
+          handles.push(handle);
+          enabled.push(false);
+          handle.onClick(() => {
+            if (handles[index] === handle && allowed(index)) (index === 0 ? guide : simple)();
+          });
+        }
+      } catch (error) {
+        remove();
+        throw error;
+      }
+    },
+    refresh() {
+      handles.forEach((handle, index) => {
+        const available = allowed(index);
+        if (enabled[index] !== available) {
+          enabled[index] = available;
+          handle.setEnabled(available);
+        }
+        for (const slot of Array.from(document.querySelectorAll("[data-composer-action]"))) {
+          if (!slot.getAttribute("data-composer-action")?.endsWith(`:${handle.actionId}`)) continue;
+          const button = slot.querySelector("button");
+          if (button && button.disabled !== !available) button.disabled = !available;
+        }
+      });
+    },
+    destroy() {
+      disposed = true;
+      remove();
+    }
+  };
+}
+
+// src/suite.ts
+function watchSuite(ctx, changed) {
+  let disposed = false;
+  let pending = false;
+  let controller;
+  let timer;
+  let status = "checking";
+  function publish(next) {
+    if (disposed || next === status) return;
+    status = next;
+    changed(next);
+  }
+  async function refresh() {
+    if (disposed) return;
+    if (controller) {
+      pending = true;
+      return;
+    }
+    clearTimeout(timer);
+    const request = new AbortController();
+    controller = request;
+    const timeout = setTimeout(() => request.abort(), 5e3);
+    try {
+      const response = await window.fetch("/api/v1/spindle", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        signal: request.signal
+      });
+      if (!response.ok) throw new Error("Extension list unavailable");
+      const data = await response.json();
+      const extensions = data?.extensions;
+      if (!Array.isArray(extensions)) throw new Error("Invalid extension list");
+      const suite = extensions.find((item) => item?.identifier === "lumiverse_suite");
+      if (!pending) publish(!suite ? "missing" : suite.enabled === true && suite.has_frontend === true ? "active" : "disabled");
+    } catch {
+      if (!pending) publish("unavailable");
+    } finally {
+      clearTimeout(timeout);
+      controller = void 0;
+      if (!disposed) {
+        const delay = pending ? 0 : 3e4;
+        pending = false;
+        timer = setTimeout(() => {
+          void refresh();
+        }, delay);
+      }
+    }
+  }
+  const onReturn = () => {
+    void refresh();
+  };
+  const onVisible = () => {
+    if (document.visibilityState === "visible") onReturn();
+  };
+  const unsubscribers = ["SPINDLE_EXTENSION_LOADED", "SPINDLE_EXTENSION_UNLOADED", "SPINDLE_EXTENSION_STATUS", "SPINDLE_EXTENSION_ERROR", "SPINDLE_BATCH_CHANGED"].map((event) => ctx.events.on(event, onReturn));
+  window.addEventListener("online", onReturn);
+  window.addEventListener("focus", onReturn);
+  document.addEventListener("visibilitychange", onVisible);
+  void refresh();
+  return () => {
+    disposed = true;
+    clearTimeout(timer);
+    controller?.abort();
+    for (const unsubscribe of unsubscribers) unsubscribe();
+    window.removeEventListener("online", onReturn);
+    window.removeEventListener("focus", onReturn);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
+}
+
 // src/frontend.ts
 function setup(ctx) {
   const root = ctx.ui.mount("settings_extensions");
@@ -392,6 +544,14 @@ function setup(ctx) {
   const clearSlot = document.createElement("div");
   clearSlot.className = "sd-control";
   clearRow.append(label("Clear Input After Guide", "Remove the direction from the chat draft after use."), clearSlot);
+  const integrationRow = document.createElement("div");
+  integrationRow.className = "sd-row";
+  const integrationSlot = document.createElement("div");
+  integrationSlot.className = "sd-control";
+  const integrationLabel = label("Integrate with Customize composer", "Checking Lumiverse Suite\u2026");
+  const integrationHint = integrationLabel.querySelector(".sd-hint");
+  integrationHint.id = "sd-composer-integration-hint";
+  integrationRow.append(integrationLabel, integrationSlot);
   const actions = document.createElement("div");
   actions.className = "sd-actions";
   const reset = document.createElement("button");
@@ -402,22 +562,36 @@ function setup(ctx) {
   status.className = "sd-status";
   status.setAttribute("role", "status");
   actions.append(reset, status);
-  panel.append(heading, intro, templateRow, clearRow, actions);
+  panel.append(heading, intro, templateRow, clearRow, integrationRow, actions);
   root.append(style, panel);
   const template = ctx.components.mountTextArea(templateSlot, { value: DEFAULT_TEMPLATE, rows: 6, ariaLabel: "Prompt Template", disabled: true, onChange: () => scheduleSave() });
   const clear = ctx.components.mountSwitch(clearSlot, { checked: true, ariaLabel: "Clear Input After Guide", disabled: true, onChange: () => scheduleSave() });
+  const integration = ctx.components.mountSwitch(integrationSlot, {
+    checked: false,
+    ariaLabel: "Integrate with Customize composer",
+    disabled: true,
+    onChange: () => {
+      scheduleSave();
+      reconcileIntegration();
+    }
+  });
   const labelSwitch = () => {
-    const button = clearSlot.querySelector('[role="switch"]');
-    if (button && button.getAttribute("aria-label") !== "Clear Input After Guide") button.setAttribute("aria-label", "Clear Input After Guide");
+    for (const [slot, name] of [[clearSlot, "Clear Input After Guide"], [integrationSlot, "Integrate with Customize composer"]]) {
+      const button = slot.querySelector('[role="switch"]');
+      if (button && button.getAttribute("aria-label") !== name) button.setAttribute("aria-label", name);
+      if (slot === integrationSlot && button && button.getAttribute("aria-describedby") !== integrationHint.id) button.setAttribute("aria-describedby", integrationHint.id);
+    }
   };
   const switchObserver = new MutationObserver(labelSwitch);
   switchObserver.observe(clearSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label"] });
+  switchObserver.observe(integrationSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label", "aria-describedby"] });
   labelSwitch();
   let current = DEFAULT_SETTINGS;
   let disposed = false;
   let busy = false;
   let simpleController;
   let settingsReady = false;
+  let suiteStatus = "checking";
   let settingsLoad;
   let settingsRetry;
   let settingsDirty = false;
@@ -526,12 +700,13 @@ function setup(ctx) {
     else waiter.resolve(msg);
   });
   function snapshot() {
-    return normalizeSettings({ version: 2, template: template.getValue(), clearInput: clear.getValue() });
+    return normalizeSettings({ version: 2, template: template.getValue(), clearInput: clear.getValue(), integrateComposer: integration.getValue() });
   }
   function show(value) {
     current = value;
     template.update({ value: value.template });
     clear.update({ checked: value.clearInput });
+    integration.update({ checked: value.integrateComposer });
   }
   function persist(override) {
     clearTimeout(saveTimer);
@@ -588,6 +763,7 @@ function setup(ctx) {
       reset.disabled = false;
       settingsReady = true;
       status.textContent = "";
+      reconcileIntegration();
       toolbar.refresh();
     }).catch((error) => {
       if (!disposed) {
@@ -603,12 +779,40 @@ function setup(ctx) {
     });
     return settingsLoad;
   }
+  const nativeActions = composerActions(ctx, () => ({ ready: settingsReady, busy }), () => {
+    void guide();
+  }, () => {
+    void sendOnly();
+  });
   const drafts = draftRecovery(ctx, () => toolbar.refresh());
   const toolbar = mountGuideToolbar(() => {
     void guide();
   }, () => {
     void sendOnly();
-  }, () => ({ ready: settingsReady, busy, drafts: drafts.count() }), () => drafts.open());
+  }, () => ({ ready: settingsReady, busy, drafts: drafts.count(), integrated: nativeActions.active() }), () => drafts.open(), () => nativeActions.refresh());
+  function reconcileIntegration() {
+    if (disposed) return;
+    const available = suiteStatus === "active" && typeof ctx.ui.registerInputBarAction === "function";
+    integration.update({ disabled: !settingsReady || !available });
+    const hints = {
+      checking: "Checking Lumiverse Suite\u2026",
+      missing: "Install and enable Lumiverse Suite to use this option. Using the standard button bar.",
+      disabled: "Enable Lumiverse Suite to use this option. Using the standard button bar.",
+      unavailable: "Could not check Lumiverse Suite. Using the standard button bar; checking again automatically.",
+      active: "Enable to register Guide Response and Simple Send, then add and arrange them in Customize composer. Off keeps the standard button bar."
+    };
+    integrationHint.textContent = suiteStatus === "active" && !available ? "This Lumiverse version does not support input action registration. Using the standard button bar." : hints[suiteStatus];
+    try {
+      nativeActions.setActive(settingsReady && available && integration.getValue());
+    } catch {
+      integrationHint.textContent = "Could not register composer actions. Using the standard button bar. Toggle this option to retry.";
+    }
+    toolbar.refresh();
+  }
+  const stopWatchingSuite = watchSuite(ctx, (value) => {
+    suiteStatus = value;
+    reconcileIntegration();
+  });
   void loadSettings().catch(() => {
   });
   async function sendOnly() {
@@ -692,10 +896,13 @@ function setup(ctx) {
     clearTimeout(saveTimer);
     clearTimeout(settingsRetry);
     switchObserver.disconnect();
+    stopWatchingSuite();
     toolbar.destroy();
+    nativeActions.destroy();
     drafts.destroy();
     template.destroy();
     clear.destroy();
+    integration.destroy();
     root.replaceChildren();
     unsubscribe();
     for (const waiter of waiting.values()) {

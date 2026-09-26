@@ -5,6 +5,9 @@ import { composer, readDraft, setDraft, waitForEmptyComposer, freshReplyButton }
 import { mountGuideToolbar } from './toolbar'
 import { simpleSend } from './simple-send'
 import { draftRecovery } from './draft-recovery'
+import { composerActions } from './composer-actions'
+import { watchSuite } from './suite'
+import type { SuiteStatus } from './suite'
 
 export function setup(ctx: SpindleFrontendContext) {
   // This public mount is rendered inside Settings → Extensions and marks the
@@ -63,6 +66,14 @@ export function setup(ctx: SpindleFrontendContext) {
   const clearSlot = document.createElement("div");
   clearSlot.className = "sd-control";
   clearRow.append(label("Clear Input After Guide", "Remove the direction from the chat draft after use."), clearSlot);
+  const integrationRow = document.createElement('div')
+  integrationRow.className = 'sd-row'
+  const integrationSlot = document.createElement('div')
+  integrationSlot.className = 'sd-control'
+  const integrationLabel = label('Integrate with Customize composer', 'Checking Lumiverse Suite…')
+  const integrationHint = integrationLabel.querySelector('.sd-hint')!
+  integrationHint.id = 'sd-composer-integration-hint'
+  integrationRow.append(integrationLabel, integrationSlot)
   const actions = document.createElement("div");
   actions.className = "sd-actions";
   const reset = document.createElement("button");
@@ -73,24 +84,33 @@ export function setup(ctx: SpindleFrontendContext) {
   status.className = "sd-status";
   status.setAttribute("role", "status");
   actions.append(reset, status);
-  panel.append(heading, intro, templateRow, clearRow, actions);
+  panel.append(heading, intro, templateRow, clearRow, integrationRow, actions);
   root.append(style, panel);
   const template = ctx.components.mountTextArea(templateSlot, { value: DEFAULT_TEMPLATE, rows: 6, ariaLabel: "Prompt Template", disabled: true, onChange: () => scheduleSave() });
   const clear = ctx.components.mountSwitch(clearSlot, { checked: true, ariaLabel: "Clear Input After Guide", disabled: true, onChange: () => scheduleSave() });
+  const integration = ctx.components.mountSwitch(integrationSlot, {
+    checked: false, ariaLabel: 'Integrate with Customize composer', disabled: true,
+    onChange: () => { scheduleSave(); reconcileIntegration() },
+  })
   // The inspected host bridge drops ariaLabel. Label the actual asynchronous
   // control, including any replacement mounted by React, until it is fixed.
   const labelSwitch = () => {
-    const button = clearSlot.querySelector('[role="switch"]')
-    if (button && button.getAttribute('aria-label') !== 'Clear Input After Guide') button.setAttribute('aria-label', 'Clear Input After Guide')
+    for (const [slot, name] of [[clearSlot, 'Clear Input After Guide'], [integrationSlot, 'Integrate with Customize composer']] as const) {
+      const button = slot.querySelector('[role="switch"]')
+      if (button && button.getAttribute('aria-label') !== name) button.setAttribute('aria-label', name)
+      if (slot === integrationSlot && button && button.getAttribute('aria-describedby') !== integrationHint.id) button.setAttribute('aria-describedby', integrationHint.id)
+    }
   }
   const switchObserver = new MutationObserver(labelSwitch)
   switchObserver.observe(clearSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ['role', 'aria-label'] })
+  switchObserver.observe(integrationSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ['role', 'aria-label', 'aria-describedby'] })
   labelSwitch()
   let current: Settings = DEFAULT_SETTINGS
   let disposed = false
   let busy = false
   let simpleController: AbortController | undefined
   let settingsReady = false
+  let suiteStatus: SuiteStatus = 'checking'
   let settingsLoad: Promise<void> | undefined
   let settingsRetry: ReturnType<typeof setTimeout> | undefined
   let settingsDirty = false
@@ -184,12 +204,13 @@ export function setup(ctx: SpindleFrontendContext) {
     else waiter.resolve(msg)
   })
   function snapshot() {
-    return normalizeSettings({ version: 2, template: template.getValue(), clearInput: clear.getValue() })
+    return normalizeSettings({ version: 2, template: template.getValue(), clearInput: clear.getValue(), integrateComposer: integration.getValue() })
   }
   function show(value: Settings) {
     current = value
     template.update({ value: value.template })
     clear.update({ checked: value.clearInput })
+    integration.update({ checked: value.integrateComposer })
   }
   function persist(override?: Settings): Promise<void> {
     clearTimeout(saveTimer); saveTimer = undefined
@@ -238,6 +259,7 @@ export function setup(ctx: SpindleFrontendContext) {
       reset.disabled = false
       settingsReady = true
       status.textContent = ''
+      reconcileIntegration()
       toolbar.refresh()
     }).catch(error => {
       if (!disposed) {
@@ -249,8 +271,26 @@ export function setup(ctx: SpindleFrontendContext) {
     return settingsLoad
   }
 
+  const nativeActions = composerActions(ctx, () => ({ ready: settingsReady, busy }), () => { void guide() }, () => { void sendOnly() })
   const drafts = draftRecovery(ctx, () => toolbar.refresh())
-  const toolbar = mountGuideToolbar(() => { void guide() }, () => { void sendOnly() }, () => ({ ready: settingsReady, busy, drafts: drafts.count() }), () => drafts.open())
+  const toolbar = mountGuideToolbar(() => { void guide() }, () => { void sendOnly() }, () => ({ ready: settingsReady, busy, drafts: drafts.count(), integrated: nativeActions.active() }), () => drafts.open(), () => nativeActions.refresh())
+  function reconcileIntegration() {
+    if (disposed) return
+    const available = suiteStatus === 'active' && typeof ctx.ui.registerInputBarAction === 'function'
+    integration.update({ disabled: !settingsReady || !available })
+    const hints: Record<SuiteStatus, string> = {
+      checking: 'Checking Lumiverse Suite…',
+      missing: 'Install and enable Lumiverse Suite to use this option. Using the standard button bar.',
+      disabled: 'Enable Lumiverse Suite to use this option. Using the standard button bar.',
+      unavailable: 'Could not check Lumiverse Suite. Using the standard button bar; checking again automatically.',
+      active: 'Enable to register Guide Response and Simple Send, then add and arrange them in Customize composer. Off keeps the standard button bar.',
+    }
+    integrationHint.textContent = suiteStatus === 'active' && !available ? 'This Lumiverse version does not support input action registration. Using the standard button bar.' : hints[suiteStatus]
+    try { nativeActions.setActive(settingsReady && available && integration.getValue()) }
+    catch { integrationHint.textContent = 'Could not register composer actions. Using the standard button bar. Toggle this option to retry.' }
+    toolbar.refresh()
+  }
+  const stopWatchingSuite = watchSuite(ctx, value => { suiteStatus = value; reconcileIntegration() })
   void loadSettings().catch(() => {})
   async function sendOnly() {
     if (busy || disposed) return
@@ -330,7 +370,8 @@ export function setup(ctx: SpindleFrontendContext) {
     clearTimeout(saveTimer)
     clearTimeout(settingsRetry)
     switchObserver.disconnect()
-    toolbar.destroy(); drafts.destroy(); template.destroy(); clear.destroy()
+    stopWatchingSuite()
+    toolbar.destroy(); nativeActions.destroy(); drafts.destroy(); template.destroy(); clear.destroy(); integration.destroy()
     root.replaceChildren(); unsubscribe()
     for (const waiter of waiting.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Extension unloaded.')) }
     waiting.clear()

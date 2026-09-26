@@ -82,10 +82,12 @@ test('rejects an ambiguous missing history boundary instead of using example or 
 })
 
 test('legacy settings migrate to user without losing template or draft preference', () => {
+  assert.equal(normalizeSettings({ integrateComposer: true }).integrateComposer, true)
+  assert.equal(normalizeSettings({ integrateComposer: 'true' }).integrateComposer, false)
   assert.equal('role' in DEFAULT_SETTINGS, false)
   assert.equal('role' in normalizeSettings(undefined), false)
   assert.deepEqual(normalizeSettings({ template: 'Custom {{input}}', role: 'system', clearInput: false }), {
-    version: 2, template: 'Custom {{input}}', clearInput: false,
+    version: 2, template: 'Custom {{input}}', clearInput: false, integrateComposer: false,
   })
   assert.equal('role' in normalizeSettings({ ...DEFAULT_SETTINGS, role: 'system' }), false)
 })

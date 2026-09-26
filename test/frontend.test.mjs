@@ -19,9 +19,28 @@ function fixture(t, options = {}) {
   const sent = [], alerts = []
   const messages = [], eventHandlers = new Map()
   const requests = []
+  let suite = options.suite ?? 'missing'
+  const registered = new Map(), registrations = []
+  const suitePending = [], suiteSignals = []
+  let suiteRequests = 0
   let finishQueue
   dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
   const nativeFetch = (url, init) => {
+    if (url === '/api/v1/spindle') {
+      suiteRequests++
+      if (suite === 'unavailable') return Promise.reject(new Error('Offline'))
+      const data = { extensions: suite === 'missing' ? [] : [{ identifier: 'lumiverse_suite', enabled: suite === 'active', has_frontend: true }] }
+      if (options.delaySuite) return new Promise((resolve, reject) => {
+        suiteSignals.push(init.signal)
+        const abort = () => reject(new Error('Aborted'))
+        init.signal.addEventListener('abort', abort, { once: true })
+        suitePending.push(() => {
+          init.signal.removeEventListener('abort', abort)
+          resolve({ ok: true, json: async () => data })
+        })
+      })
+      return Promise.resolve({ ok: true, json: async () => data })
+    }
     requests.push({ url, init })
     return new Promise((resolve, reject) => {
       finishQueue = (status = 200) => {
@@ -88,7 +107,34 @@ function fixture(t, options = {}) {
   const ctx = {
     ui: {
       mount: () => document.querySelector('#settings'),
-      registerInputBarAction: () => { throw new Error('Guide Response should be directly on the input bar') },
+      registerInputBarAction: config => {
+        if (options.failRegistration && registrations.length % 2 === 1) throw new Error('Registration failed')
+        const handlers = new Set()
+        const action = {
+          ...config, actionId: `spindle:test:action:${config.id}:${registrations.length + 1}`,
+          setEnabled: value => { action.enabled = value },
+          onClick: handler => { handlers.add(handler); return () => handlers.delete(handler) },
+          click: () => { for (const handler of handlers) handler() },
+          // Keep callback references here to verify they are safe even if a host
+          // surface briefly retains a destroyed action during reconciliation.
+          destroy: () => { registered.delete(config.id); action.element?.remove() },
+          show: () => {
+            action.element?.remove()
+            const slot = document.createElement('span')
+            slot.setAttribute('data-composer-action', `input-action:test:${action.actionId}`)
+            const button = document.createElement('button')
+            button.textContent = config.label
+            button.addEventListener('click', action.click)
+            slot.append(button)
+            document.querySelector('[data-component="InputArea"]').append(slot)
+            action.element = slot
+            return button
+          },
+        }
+        registered.set(config.id, action)
+        registrations.push(action)
+        return action
+      },
     },
     components: { mountTextArea: mount, mountSwitch: mount },
     getActiveChat: () => ({ chatId }),
@@ -115,6 +161,9 @@ function fixture(t, options = {}) {
   t.after(() => { cleanup(); dom.window.close() })
   return {
     input, send, sent, alerts, controls, cleanup: () => cleanup(), messages, emit, eventHandlers, requests, nativeFetch,
+    registered, registrations, suiteRequests: () => suiteRequests,
+    suiteSignals, finishSuite: () => suitePending.shift()(),
+    setSuite: value => { suite = value; emit('SPINDLE_EXTENSION_STATUS', { operation: 'updated' }) },
     finishQueue: status => finishQueue(status),
     reload: () => { cleanup(); cleanup = setup(ctx) },
     recoverButton: () => document.querySelector('button[aria-label="Recover draft"]'),
@@ -207,7 +256,7 @@ test('loads settings before guiding and flushes unsaved component edits in order
   f.idle('Next direction')
   f.click(); await tick(); await tick()
   const save = f.sent.find(m => m.type === 'settings:save')
-  assert.deepEqual(save.settings, { version: 2, template: 'Changed {{input}}', clearInput: false })
+  assert.deepEqual(save.settings, { version: 2, template: 'Changed {{input}}', clearInput: false, integrateComposer: false })
   assert.ok(f.sent.indexOf(save) < f.sent.findLastIndex(m => m.type === 'guide:arm'))
 })
 
@@ -359,9 +408,9 @@ test('unloading a pending Simple Send preserves a recoverable copy without retry
 })
 
 test('unconfirmed Simple Send reports uncertainty without automatic retry or duplicate draft', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const f = fixture(t, { delayQueue: true })
   await tick()
-  t.mock.timers.enable({ apis: ['setTimeout'] })
   f.simpleClick(); await tick()
   t.mock.timers.tick(35000); await tick()
   assert.match(f.alerts[0], /Check the chat history before retrying/)
@@ -401,10 +450,10 @@ for (const outcome of ['failed', 'finished', 'stopped']) {
 }
 
 test('polling recovers missed start and completion, and never expires a still-running guide', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const backend = backendHarness()
   const f = fixture(t, { backend, dropLifecycle: true })
   await tick()
-  t.mock.timers.enable({ apis: ['setTimeout'] })
   f.click(); await tick()
   for (let i = 0; i < 5; i++) { t.mock.timers.tick(5000); await tick() }
   assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
@@ -419,11 +468,11 @@ test('polling recovers missed start and completion, and never expires a still-ru
 })
 
 test('transport timeouts keep recovery pending and retry after reconnect without duplicate polling', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const backend = backendHarness()
   const options = { backend }
   const f = fixture(t, options)
   await tick()
-  t.mock.timers.enable({ apis: ['setTimeout'] })
   f.click(); await tick(); await tick(); await backend.intercept()
   options.offline = true
   t.mock.timers.tick(5000); await tick()
@@ -506,7 +555,7 @@ test('settings load retries after timeout and ignores the expired response', asy
   options.delaySettings = false
   window.dispatchEvent(new Event('online')); await tick()
   assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
-  assert.ok(f.controls.every(control => !control.disabled()))
+  assert.ok(f.controls.slice(0, 2).every(control => !control.disabled()))
   assert.equal(f.guideButton().disabled, false)
   t.mock.timers.tick(5000); await tick()
   assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
@@ -611,9 +660,9 @@ test('Recover draft never overwrites another draft or another chat', async t => 
 })
 
 test('missing native save request times out and removes the temporary transport observer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   const f = fixture(t, { skipQueueRequest: true })
   await tick()
-  t.mock.timers.enable({ apis: ['setTimeout'] })
   f.simpleClick(); await tick()
   assert.notEqual(window.fetch, f.nativeFetch)
   t.mock.timers.tick(15000); await tick()
@@ -644,4 +693,165 @@ test('the native switch receives its accessible name even when the host remounts
   control.replaceWith(replacement); await tick()
   assert.equal(replacement.getAttribute('aria-label'), 'Clear Input After Guide')
   f.cleanup()
+})
+
+for (const suite of ['missing', 'disabled', 'unavailable']) {
+  test(`composer integration is unavailable with Suite ${suite}, without discarding the preference`, async t => {
+    const f = fixture(t, { suite, settings: { integrateComposer: true } })
+    await tick()
+    assert.equal(f.controls[2].disabled(), true)
+    assert.equal(f.controls[2].getValue(), true)
+    assert.equal(f.registered.size, 0)
+    assert.ok(f.guideButton())
+    const expected = { missing: /Install and enable/, disabled: /Enable Lumiverse Suite/, unavailable: /Could not check/ }
+    assert.match(document.querySelector('#sd-composer-integration-hint').textContent, expected[suite])
+    const control = document.querySelector('[aria-label="Integrate with Customize composer"]')
+    assert.equal(control.getAttribute('aria-describedby'), 'sd-composer-integration-hint')
+  })
+}
+
+test('Suite alone leaves DOM mode; enabling persists the option and registers only two actions', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture(t, { suite: 'active' })
+  await tick()
+  assert.equal(f.controls[2].disabled(), false)
+  assert.equal(f.controls[2].getValue(), false)
+  assert.equal(f.registered.size, 0)
+  f.controls[2].edit({ checked: true })
+  await tick()
+  assert.equal(f.registered.size, 2)
+  assert.equal(f.guideButton(), null)
+  assert.equal(f.simpleButton(), null)
+  t.mock.timers.tick(500); await tick()
+  assert.equal(f.sent.find(m => m.type === 'settings:save').settings.integrateComposer, true)
+  const old = f.registrations[0]
+  f.controls[2].edit({ checked: false }); await tick()
+  assert.equal(f.registered.size, 0)
+  assert.ok(f.guideButton())
+  f.controls[2].edit({ checked: true }); await tick()
+  old.click(); await tick()
+  assert.equal(f.clicks(), 0)
+  f.cleanup()
+  assert.equal(f.registered.size, 0)
+  assert.ok([...f.eventHandlers.values()].every(handlers => handlers.size === 0))
+})
+
+test('Suite disable and re-enable switch modes without changing the saved preference', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true } })
+  await tick()
+  assert.equal(f.registered.size, 2)
+  f.setSuite('disabled'); await tick()
+  assert.equal(f.controls[2].disabled(), true)
+  assert.equal(f.controls[2].getValue(), true)
+  assert.equal(f.registered.size, 0)
+  assert.ok(f.guideButton())
+  f.setSuite('active'); await tick()
+  assert.equal(f.controls[2].disabled(), false)
+  assert.equal(f.registered.size, 2)
+  assert.equal(f.guideButton(), null)
+  assert.equal(f.sent.filter(m => m.type === 'settings:save').length, 0)
+})
+
+test('registered guide respects busy and draft guards; switching mode never starts a second generation', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true } })
+  await tick()
+  const guide = f.registered.get('scene_direction.guide')
+  const button = guide.show(); await tick()
+  assert.equal(button.disabled, false)
+  guide.click(); guide.click(); await tick()
+  assert.equal(f.clicks(), 1)
+  assert.equal(button.disabled, true)
+  f.registered.get('scene_direction.simple_send').click(); await tick()
+  assert.equal(f.clicks(), 1)
+  f.setSuite('disabled'); await tick()
+  assert.equal(f.guideButton().disabled, true)
+  f.notify('guide:failed', 'Provider disconnected'); await tick()
+  assert.equal(f.input.value, 'Direction with $&')
+  f.idle(''); f.setSuite('active'); await tick()
+  const newGuide = f.registered.get('scene_direction.guide')
+  newGuide.click(); await tick()
+  assert.equal(f.clicks(), 1)
+  assert.equal(newGuide.enabled, false)
+})
+
+test('hiding registered composer buttons does not reinsert the DOM toolbar or alter registrations', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true } })
+  await tick()
+  const guide = f.registered.get('scene_direction.guide')
+  guide.show(); await tick()
+  guide.element.remove(); f.idle('Another draft'); await tick()
+  assert.equal(document.querySelector('#sd-guide-toolbar'), null)
+  assert.equal(f.registrations.length, 2)
+  assert.equal(document.querySelector('[data-composer-action]'), null)
+})
+
+test('registered Simple Send uses the same save path and leaves recovery accessible on failure', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true }, queueStatus: 500 })
+  await tick()
+  f.registered.get('scene_direction.simple_send').click(); await tick(); await tick()
+  assert.equal(f.clicks(), 1)
+  assert.equal(f.sent.some(m => m.type === 'guide:arm'), false)
+  assert.ok(f.recoverButton())
+  assert.equal(f.simpleButton().hidden, true)
+  f.recoverButton().click(); await tick()
+  assert.equal(document.querySelector('dialog textarea').value, 'Direction with $&')
+})
+
+test('partial registration failure cleans up and falls back to DOM buttons', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true }, failRegistration: true })
+  await tick()
+  assert.equal(f.registered.size, 0)
+  assert.ok(f.guideButton())
+  assert.match(document.querySelector('#sd-composer-integration-hint').textContent, /Could not register/)
+})
+
+test('Suite query failure falls back and online recheck restores the chosen integration', async t => {
+  const f = fixture(t, { suite: 'active', settings: { integrateComposer: true } })
+  await tick()
+  f.setSuite('unavailable'); await tick()
+  assert.ok(f.guideButton())
+  assert.equal(f.registered.size, 0)
+  f.setSuite('active'); await tick()
+  assert.equal(f.registered.size, 2)
+  assert.equal(f.guideButton(), null)
+  f.cleanup()
+  const count = f.suiteRequests()
+  window.dispatchEvent(new Event('online')); await tick()
+  assert.equal(f.suiteRequests(), count)
+})
+
+test('extension changes during an availability query discard the stale result and coalesce a recheck', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture(t, { suite: 'active', delaySuite: true, settings: { integrateComposer: true } })
+  await tick()
+  assert.equal(f.controls[2].disabled(), true)
+  f.setSuite('disabled'); f.setSuite('missing')
+  assert.equal(f.suiteRequests(), 1)
+  f.finishSuite(); await tick()
+  assert.equal(f.registered.size, 0)
+  t.mock.timers.tick(0); await tick()
+  assert.equal(f.suiteRequests(), 2)
+  f.finishSuite(); await tick()
+  assert.match(document.querySelector('#sd-composer-integration-hint').textContent, /Install and enable/)
+  assert.equal(f.registered.size, 0)
+})
+
+test('Suite query timeout is recoverable and teardown aborts outstanding queries', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const options = { suite: 'active', delaySuite: true, settings: { integrateComposer: true } }
+  const f = fixture(t, options)
+  await tick()
+  t.mock.timers.tick(5000); await tick()
+  assert.equal(f.suiteSignals[0].aborted, true)
+  assert.match(document.querySelector('#sd-composer-integration-hint').textContent, /Could not check/)
+  options.delaySuite = false
+  window.dispatchEvent(new Event('online')); await tick()
+  assert.equal(f.registered.size, 2)
+  options.delaySuite = true
+  window.dispatchEvent(new Event('focus')); await tick()
+  f.cleanup()
+  assert.equal(f.suiteSignals.at(-1).aborted, true)
+  f.finishSuite(); await tick()
+  assert.equal(f.registered.size, 0)
+  assert.equal(document.querySelector('#sd-guide-toolbar'), null)
 })

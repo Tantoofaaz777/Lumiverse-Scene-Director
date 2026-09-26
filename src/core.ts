@@ -1,6 +1,6 @@
 export const DEFAULT_TEMPLATE = '[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]'
-export type Settings = { version: 2; template: string; clearInput: boolean }
-export const DEFAULT_SETTINGS: Settings = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true }
+export type Settings = { version: 2; template: string; clearInput: boolean; integrateComposer: boolean }
+export const DEFAULT_SETTINGS: Settings = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true, integrateComposer: false }
 
 export function normalizeSettings(value: unknown): Settings {
   const v = value && typeof value === 'object' ? value as Partial<Settings> : {}
@@ -8,6 +8,7 @@ export function normalizeSettings(value: unknown): Settings {
     version: 2,
     template: typeof v.template === 'string' ? v.template : DEFAULT_TEMPLATE,
     clearInput: v.clearInput !== false,
+    integrateComposer: v.integrateComposer === true,
   }
 }
 
