@@ -2,7 +2,7 @@
   "version": "1.0.9",
   "name": "Scene Direction",
   "identifier": "scene_direction",
-  "author": "Community",
+  "author": "Tantoofaaz777",
   "description": "Guide the next reply with a temporary direction, or save a normal user message with Simple Send.",
   "permissions": [
     "interceptor",
