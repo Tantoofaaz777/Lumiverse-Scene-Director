@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "name": "Scene Direction",
+  "identifier": "scene_direction",
+  "author": "Community",
+  "description": "Use the chat draft as a one-shot, invisible direction for a normal fresh reply.",
+  "permissions": ["interceptor"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js"
+}

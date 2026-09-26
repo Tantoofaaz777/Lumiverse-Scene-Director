@@ -1,0 +1,11 @@
+{
+  "name": "lumiverse-scene-direction",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/backend.ts --bundle --platform=neutral --format=esm --outfile=dist/backend.js && esbuild src/frontend.ts --bundle --platform=browser --format=esm --outfile=dist/frontend.js && esbuild src/core.ts --platform=node --format=esm --outfile=dist/core.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": { "esbuild": "^0.25.0", "typescript": "^5.8.0", "lumiverse-spindle-types": "^0.6.36" }
+}
