@@ -4,9 +4,9 @@ import type { Settings } from './core'
 import { composer, readDraft, setDraft, waitForEmptyComposer } from './composer'
 
 export function setup(ctx: SpindleFrontendContext) {
-  if (!ctx.ui.registerSettingsTab) throw new Error('This Lumiverse version lacks extension settings tabs.')
-  const tab = ctx.ui.registerSettingsTab({ id: 'scene-direction', title: 'Scene Direction', shortName: 'Direction', description: 'One-shot scene direction settings' })
-  const root = tab.root
+  // This public mount is rendered inside Settings → Extensions and marks the
+  // extension as having its own settings in Lumiverse's Extensions panel.
+  const root = ctx.ui.mount('settings_extensions')
   const heading = document.createElement('h2'); heading.textContent = 'Scene Direction'
   const templateLabel = document.createElement('label'); templateLabel.textContent = 'Prompt Template'
   const template = document.createElement('textarea'); template.rows = 8; template.style.width = '100%'
@@ -86,7 +86,7 @@ export function setup(ctx: SpindleFrontendContext) {
     } finally { if (clicked) setTimeout(() => { busy = false }, 2000); else busy = false }
   }
   return () => {
-    offClick(); action.destroy(); tab.destroy(); unsubscribe()
+    offClick(); action.destroy(); root.replaceChildren(); unsubscribe()
     for (const waiter of waiting.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Extension unloaded.')) }
     waiting.clear()
   }
