@@ -1,5 +1,5 @@
 export const DEFAULT_TEMPLATE = '[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]'
-export type Settings = { version: 2; template: string; role: 'system' | 'user'; clearInput: boolean }
+export type Settings = { version: 2; template: string; role: 'user'; clearInput: boolean }
 export const DEFAULT_SETTINGS: Settings = { version: 2, template: DEFAULT_TEMPLATE, role: 'user', clearInput: true }
 
 export function normalizeSettings(value: unknown): Settings {
@@ -7,9 +7,8 @@ export function normalizeSettings(value: unknown): Settings {
   return {
     version: 2,
     template: typeof v.template === 'string' ? v.template : DEFAULT_TEMPLATE,
-    // Legacy settings used System by default. Migrate the existing installation
-    // to a temporary user turn, while allowing an explicit System choice later.
-    role: v.version === 2 && v.role === 'system' ? 'system' : 'user',
+    // Ignore saved role choices from earlier versions: guides are user turns.
+    role: 'user',
     clearInput: v.clearInput !== false,
   }
 }
@@ -75,7 +74,7 @@ export function inject<T extends { role: string; content: unknown; __isChatHisto
     if (messages.length === 0) insertionIndex = 0
     else throw new Error('Scene Direction could not locate chat history in the assembled prompt. Include a native Chat History block with at least one visible chat turn in your preset.')
   }
-  const added = { role: pending.settings.role, content: renderTemplate(pending.settings.template, pending.input) }
+  const added = { role: 'user', content: renderTemplate(pending.settings.template, pending.input) }
   // This is a synthetic prompt message, not a stored source turn: do not forge
   // sourceMessageId or __isChatHistory. Report it as its own breakdown entry.
   return {

@@ -20,7 +20,7 @@ export function setup(ctx: SpindleFrontendContext) {
     .sd-row--stack { display: block; }
     .sd-label { display: block; font-size: 14px; font-weight: 550; }
     .sd-hint { margin: 4px 0 0; }
-    .sd-control { min-width: 130px; flex: 0 0 auto; }
+    .sd-control { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; }
     .sd-template { margin-top: 12px; width: 100%; min-width: 0; }
     .sd-template textarea { box-sizing: border-box; width: 100%; max-width: 100%; }
     .sd-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -31,7 +31,7 @@ export function setup(ctx: SpindleFrontendContext) {
     .sd-reset:hover { background: var(--lumiverse-fill-hover); border-color: var(--lumiverse-border-hover); }
     .sd-reset:focus-visible { outline: 2px solid var(--lumiverse-accent); outline-offset: 2px; }
     .sd-status { margin: 0; color: var(--lumiverse-text-dim); font-size: 12px; }
-    @media (max-width: 520px) { .sd-row { gap: 10px; } .sd-control { min-width: 108px; } }
+    @media (max-width: 520px) { .sd-row { gap: 10px; } }
   `;
   const panel = document.createElement("section");
   panel.className = "sd-settings";
@@ -57,11 +57,6 @@ export function setup(ctx: SpindleFrontendContext) {
   const templateSlot = document.createElement("div");
   templateSlot.className = "sd-template";
   templateRow.append(label("Prompt Template", "Use {{input}} to place the draft in the one-shot instruction."), templateSlot);
-  const roleRow = document.createElement("div");
-  roleRow.className = "sd-row";
-  const roleSlot = document.createElement("div");
-  roleSlot.className = "sd-control";
-  roleRow.append(label("Injection Role", "User by default. Placed after the last chat turn, before post-history instructions."), roleSlot);
   const clearRow = document.createElement("div");
   clearRow.className = "sd-row";
   const clearSlot = document.createElement("div");
@@ -77,15 +72,9 @@ export function setup(ctx: SpindleFrontendContext) {
   status.className = "sd-status";
   status.setAttribute("role", "status");
   actions.append(reset, status);
-  panel.append(heading, intro, templateRow, roleRow, clearRow, actions);
+  panel.append(heading, intro, templateRow, clearRow, actions);
   root.append(style, panel);
   const template = ctx.components.mountTextArea(templateSlot, { value: DEFAULT_TEMPLATE, rows: 6, ariaLabel: "Prompt Template", disabled: true, onChange: () => scheduleSave() });
-  const role = ctx.components.mountSelect(roleSlot, {
-    value: DEFAULT_SETTINGS.role,
-    options: [{ value: "user", label: "User" }, { value: "system", label: "System" }],
-    ariaLabel: "Injection Role",
-    disabled: true, onChange: () => scheduleSave()
-  });
   const clear = ctx.components.mountSwitch(clearSlot, { checked: true, ariaLabel: "Clear Input After Guide", disabled: true, onChange: () => scheduleSave() });
   let current: Settings = DEFAULT_SETTINGS
   let disposed = false
@@ -153,12 +142,11 @@ export function setup(ctx: SpindleFrontendContext) {
     else waiter.resolve(msg)
   })
   function snapshot() {
-    return normalizeSettings({ version: 2, template: template.getValue(), role: role.getValue(), clearInput: clear.getValue() })
+    return normalizeSettings({ version: 2, template: template.getValue(), clearInput: clear.getValue() })
   }
   function show(value: Settings) {
     current = value
     template.update({ value: value.template })
-    role.update({ value: value.role })
     clear.update({ checked: value.clearInput })
   }
   function persist(override?: Settings): Promise<void> {
@@ -189,7 +177,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const ready = request('settings:get').then(result => {
     if (disposed) return
     show(normalizeSettings(result.settings))
-    template.update({ disabled: false }); role.update({ disabled: false }); clear.update({ disabled: false })
+    template.update({ disabled: false }); clear.update({ disabled: false })
     reset.disabled = false
     settingsReady = true
     toolbar.refresh()
@@ -206,7 +194,7 @@ export function setup(ctx: SpindleFrontendContext) {
     try {
       status.textContent = 'Sending your message…'
       await simpleSend(ctx, controller.signal)
-      if (!disposed) status.textContent = 'User message saved.'
+      if (!disposed && status.textContent === 'Sending your message…') status.textContent = ''
     } catch (error) {
       if (!disposed) fail(error instanceof Error ? error.message : 'Simple Send failed.')
     } finally {
@@ -275,7 +263,7 @@ export function setup(ctx: SpindleFrontendContext) {
     disposed = true
     simpleController?.abort()
     clearTimeout(saveTimer)
-    toolbar.destroy(); template.destroy(); role.destroy(); clear.destroy()
+    toolbar.destroy(); template.destroy(); clear.destroy()
     root.replaceChildren(); unsubscribe()
     for (const waiter of waiting.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Extension unloaded.')) }
     waiting.clear()

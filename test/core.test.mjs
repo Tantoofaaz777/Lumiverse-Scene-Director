@@ -63,11 +63,11 @@ test('injection follows the last stored turn and keeps post-history instructions
   assert.equal(output.messages[5].__isChatHistory, undefined)
 })
 
-test('appends after a final user turn too, and preserves an explicit system role in the same position', () => {
+test('appends after a final user turn and always uses user even with a stale system setting', () => {
   const messages = [{ role: 'user', content: 'Latest turn', __isChatHistory: true }]
   for (const role of ['user', 'system']) {
     const result = inject(messages, { input: 'Direction', settings: { ...DEFAULT_SETTINGS, role } })
-    assert.equal(result.messages[1].role, role)
+    assert.equal(result.messages[1].role, 'user')
     assert.equal(result.messages[0], messages[0])
     assert.equal(result.breakdown[0].messageIndex, 1)
   }
@@ -87,5 +87,5 @@ test('legacy settings migrate to user without losing template or draft preferenc
   assert.deepEqual(normalizeSettings({ template: 'Custom {{input}}', role: 'system', clearInput: false }), {
     version: 2, template: 'Custom {{input}}', role: 'user', clearInput: false,
   })
-  assert.equal(normalizeSettings({ ...DEFAULT_SETTINGS, role: 'system' }).role, 'system')
+  assert.equal(normalizeSettings({ ...DEFAULT_SETTINGS, role: 'system' }).role, 'user')
 })

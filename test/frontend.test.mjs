@@ -171,8 +171,7 @@ test('loads settings before guiding and flushes unsaved component edits in order
   f.notify('guide:finished')
   // Settings controls are preserved from the formerly hand-edited bundle.
   f.controls[0].edit({ value: 'Changed {{input}}' })
-  f.controls[1].edit({ value: 'user' })
-  f.controls[2].edit({ checked: false })
+  f.controls[1].edit({ checked: false })
   // Put the host back into its idle state with a new draft.
   f.idle('Next direction')
   f.click(); await tick(); await tick()
@@ -262,7 +261,7 @@ for (const mac of [false, true]) {
     assert.equal(f.input.value, '')
     assert.equal(f.sent.some(m => m.type.startsWith('guide:')), false)
     assert.ok(f.send.querySelector('.lucide-send'))
-    assert.match(document.querySelector('.sd-status').textContent, /User message saved/)
+    assert.equal(document.querySelector('.sd-status').textContent, '')
     assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 0)
     assert.deepEqual(f.alerts, [])
   })

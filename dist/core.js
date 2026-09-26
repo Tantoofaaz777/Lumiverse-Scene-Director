@@ -5,9 +5,8 @@ function normalizeSettings(value) {
   return {
     version: 2,
     template: typeof v.template === "string" ? v.template : DEFAULT_TEMPLATE,
-    // Legacy settings used System by default. Migrate the existing installation
-    // to a temporary user turn, while allowing an explicit System choice later.
-    role: v.version === 2 && v.role === "system" ? "system" : "user",
+    // Ignore saved role choices from earlier versions: guides are user turns.
+    role: "user",
     clearInput: v.clearInput !== false
   };
 }
@@ -72,7 +71,7 @@ function inject(messages, pending) {
     if (messages.length === 0) insertionIndex = 0;
     else throw new Error("Scene Direction could not locate chat history in the assembled prompt. Include a native Chat History block with at least one visible chat turn in your preset.");
   }
-  const added = { role: pending.settings.role, content: renderTemplate(pending.settings.template, pending.input) };
+  const added = { role: "user", content: renderTemplate(pending.settings.template, pending.input) };
   return {
     messages: [...messages.slice(0, insertionIndex), added, ...messages.slice(insertionIndex)],
     breakdown: [{ messageIndex: insertionIndex, name: "Scene Direction" }]
