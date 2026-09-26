@@ -38,9 +38,7 @@ async function waitForEmptyComposer() {
 
 // src/frontend.ts
 function setup(ctx) {
-  if (!ctx.ui.registerSettingsTab) throw new Error("This Lumiverse version lacks extension settings tabs.");
-  const tab = ctx.ui.registerSettingsTab({ id: "scene-direction", title: "Scene Direction", shortName: "Direction", description: "One-shot scene direction settings" });
-  const root = tab.root;
+  const root = ctx.ui.mount("settings_extensions");
   const heading = document.createElement("h2");
   heading.textContent = "Scene Direction";
   const templateLabel = document.createElement("label");
@@ -162,7 +160,7 @@ function setup(ctx) {
   return () => {
     offClick();
     action.destroy();
-    tab.destroy();
+    root.replaceChildren();
     unsubscribe();
     for (const waiter of waiting.values()) {
       clearTimeout(waiter.timer);
