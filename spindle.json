@@ -1,10 +1,13 @@
 {
-  "version": "1.0.2",
+  "version": "1.0.6",
   "name": "Scene Direction",
   "identifier": "scene_direction",
   "author": "Community",
-  "description": "Use the chat draft as a one-shot, invisible direction for a normal fresh reply.",
-  "permissions": ["interceptor"],
+  "description": "Guide the next reply with a temporary direction, or save a normal user message with Simple Send.",
+  "permissions": [
+    "interceptor",
+    "generation"
+  ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js"
 }

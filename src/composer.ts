@@ -19,9 +19,17 @@ export function setDraft(value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }))
   // React textarea onChange is driven by the bubbling native input event.
 }
-export async function waitForEmptyComposer() {
+export function freshReplyButton(input: HTMLTextAreaElement, draftLabel: string) {
+  const current = composer()
+  if (current.input !== input || !input.isConnected || input.value !== '' || !current.send) throw new Error('The fresh-reply control is unavailable or the chat draft changed.')
+  // The same Send icon covers attachments and pending regex send actions.
+  // The accessible label changes only when hasDraftContent becomes false.
+  // Comparing against the nonempty draft works in every host locale.
+  const label = current.send.getAttribute('aria-label')
+  if (!draftLabel || !label || label === draftLabel) throw new Error('Remove pending attachments or selected send actions before using Guide Response.')
+  return current.send
+}
+export async function waitForEmptyComposer(input: HTMLTextAreaElement, draftLabel: string) {
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-  const { input, send } = composer()
-  if (input.value !== '' || !send) throw new Error('The fresh-reply control is unavailable or the input did not clear.')
-  return send
+  return freshReplyButton(input, draftLabel)
 }

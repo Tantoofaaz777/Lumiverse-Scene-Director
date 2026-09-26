@@ -1,11 +1,18 @@
 {
   "name": "lumiverse-scene-direction",
-  "version": "1.0.2",
+  "version": "1.0.6",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "esbuild src/backend.ts --bundle --platform=neutral --format=esm --outfile=dist/backend.js && esbuild src/frontend.ts --bundle --platform=browser --format=esm --outfile=dist/frontend.js && esbuild src/core.ts --platform=node --format=esm --outfile=dist/core.js",
-    "test": "node --test test/*.test.mjs"
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit"
   },
-  "devDependencies": { "esbuild": "^0.25.0", "typescript": "^5.8.0", "lumiverse-spindle-types": "^0.6.36" }
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.1.0",
+    "lumiverse-spindle-types": "^0.6.36",
+    "typescript": "^5.8.0"
+  }
 }
