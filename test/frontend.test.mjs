@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS } from '../dist/core.js'
 import { backendHarness, tick } from './backend-harness.mjs'
 
 function fixture(t, options = {}) {
-  const dom = new JSDOM('<div data-component="InputArea"><div data-test-input-row><div><textarea name="chat-message"></textarea></div><div><button aria-label="Enviar mensagem"><svg class="lucide-send"></svg></button></div></div></div><section id="settings"></section>')
+  const dom = new JSDOM('<div data-component="InputArea"><div data-test-input-row><div><textarea name="chat-message"></textarea></div><div><button aria-label="Enviar mensagem"><svg class="lucide-send"></svg></button></div></div></div><section id="settings"></section>', { url: 'https://lumiverse.test/chat' })
   Object.assign(globalThis, {
     window: dom.window, document: dom.window.document,
     HTMLTextAreaElement: dom.window.HTMLTextAreaElement, Event: dom.window.Event,
@@ -18,6 +18,22 @@ function fixture(t, options = {}) {
   const controls = []
   const sent = [], alerts = []
   const messages = [], eventHandlers = new Map()
+  const requests = []
+  let finishQueue
+  dom.window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
+  const nativeFetch = (url, init) => {
+    requests.push({ url, init })
+    return new Promise((resolve, reject) => {
+      finishQueue = (status = 200) => {
+        if (status === 0) { reject(new Error('Network disconnected')); return }
+        const message = { ...JSON.parse(init.body), chat_id: chatId, id: 'saved-message' }
+        const response = { ok: status === 200, status, json: async () => message, clone: () => ({ json: async () => message }) }
+        resolve(response)
+      }
+      if (!options.delayQueue) queueMicrotask(() => finishQueue(options.queueStatus ?? 200))
+    })
+  }
+  window.fetch = nativeFetch
   let receiver, clicks = 0, chatId = 'A', extras = options.extras || false
   let starting = false
   const render = () => {
@@ -40,17 +56,21 @@ function fixture(t, options = {}) {
       const savedChatId = chatId
       const message = { is_user: true, content: input.value.trim(), name: 'Active persona', extra: extras ? { attachments: ['image'] } : {} }
       input.value = ''; render()
-      if (!options.delayQueue) queueMicrotask(() => {
-        messages.push(message)
-        emit('MESSAGE_SENT', { chatId: savedChatId, message })
-      })
+      if (options.skipQueueRequest) return
+      void window.fetch(`/api/v1/chats/${savedChatId}/messages`, { method: 'POST', body: JSON.stringify(message) }).then(response => {
+        if (response.ok) {
+          messages.push(message)
+          emit('MESSAGE_SENT', { chatId: savedChatId, message })
+        }
+      }).catch(() => {})
       return
     }
     if (!options.ignoreClick) queueMicrotask(() => { starting = true; render(); notify('guide:started') })
   })
   function mount(target, initial) {
     let config = initial
-    const element = document.createElement('input')
+    const element = document.createElement(initial.checked === undefined ? 'input' : 'button')
+    if (initial.checked !== undefined) element.setAttribute('role', 'switch')
     target.append(element)
     const handle = {
       getValue: () => config.checked ?? config.value,
@@ -70,7 +90,7 @@ function fixture(t, options = {}) {
       mount: () => document.querySelector('#settings'),
       registerInputBarAction: () => { throw new Error('Guide Response should be directly on the input bar') },
     },
-    components: { mountTextArea: mount, mountSelect: mount, mountSwitch: mount },
+    components: { mountTextArea: mount, mountSwitch: mount },
     getActiveChat: () => ({ chatId }),
     events: { on: (event, handler) => {
       if (!eventHandlers.has(event)) eventHandlers.set(event, new Set())
@@ -91,10 +111,13 @@ function fixture(t, options = {}) {
   if (options.backend) options.backend.api.sendToFrontend = payload => {
     if (!options.offline && (!options.dropLifecycle || payload.requestId)) receiver(payload)
   }
-  const cleanup = setup(ctx)
+  let cleanup = setup(ctx)
   t.after(() => { cleanup(); dom.window.close() })
   return {
-    input, send, sent, alerts, controls, cleanup, messages, emit, eventHandlers,
+    input, send, sent, alerts, controls, cleanup: () => cleanup(), messages, emit, eventHandlers, requests, nativeFetch,
+    finishQueue: status => finishQueue(status),
+    reload: () => { cleanup(); cleanup = setup(ctx) },
+    recoverButton: () => document.querySelector('button[aria-label="Recover draft"]'),
     simpleClick: () => document.querySelector('button[aria-label="Simple Send"]').click(),
     simpleButton: () => document.querySelector('button[aria-label="Simple Send"]'),
     click: () => document.querySelector('#sd-guide-toolbar button').click(), clicks: () => clicks,
@@ -184,7 +207,7 @@ test('loads settings before guiding and flushes unsaved component edits in order
   f.idle('Next direction')
   f.click(); await tick(); await tick()
   const save = f.sent.find(m => m.type === 'settings:save')
-  assert.deepEqual(save.settings, { version: 2, template: 'Changed {{input}}', role: 'user', clearInput: false })
+  assert.deepEqual(save.settings, { version: 2, template: 'Changed {{input}}', clearInput: false })
   assert.ok(f.sent.indexOf(save) < f.sent.findLastIndex(m => m.type === 'guide:arm'))
 })
 
@@ -270,7 +293,7 @@ for (const mac of [false, true]) {
     assert.equal(f.sent.some(m => m.type.startsWith('guide:')), false)
     assert.ok(f.send.querySelector('.lucide-send'))
     assert.equal(document.querySelector('.sd-status').textContent, '')
-    assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 0)
+    assert.equal(f.recoverButton().hidden, true)
     assert.deepEqual(f.alerts, [])
   })
 }
@@ -287,6 +310,9 @@ test('Simple Send is independent of guide settings and blocks both extension act
   await tick()
   assert.equal(f.simpleButton().disabled, true)
   f.emit('MESSAGE_SENT', { chatId: 'A', message: { is_user: true } })
+  await tick()
+  assert.equal(f.simpleButton().disabled, true)
+  f.finishQueue()
   await tick()
   assert.equal(f.simpleButton().disabled, false)
   assert.equal(f.input.value, 'Next message')
@@ -321,12 +347,12 @@ for (const change of ['chat', 'draft', 'generation', 'unload']) {
   })
 }
 
-test('unloading a pending Simple Send removes its listener without retrying or restoring the draft', async t => {
+test('unloading a pending Simple Send preserves a recoverable copy without retrying', async t => {
   const f = fixture(t, { delayQueue: true })
   await tick(); f.simpleClick(); await tick()
-  assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 1)
+  assert.equal(window.fetch, f.nativeFetch)
   f.cleanup(); await tick()
-  assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 0)
+  assert.equal(JSON.parse(window.sessionStorage.getItem('scene-direction:simple-send-drafts')).length, 1)
   assert.equal(f.input.value, '')
   assert.equal(f.clicks(), 1)
   assert.deepEqual(f.alerts, [])
@@ -337,11 +363,11 @@ test('unconfirmed Simple Send reports uncertainty without automatic retry or dup
   await tick()
   t.mock.timers.enable({ apis: ['setTimeout'] })
   f.simpleClick(); await tick()
-  t.mock.timers.tick(15000); await tick()
+  t.mock.timers.tick(35000); await tick()
   assert.match(f.alerts[0], /Check the chat history before retrying/)
   assert.equal(f.clicks(), 1)
   assert.equal(f.input.value, '')
-  assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 0)
+  assert.equal(f.recoverButton().hidden, false)
   f.idle('Another message'); await tick()
   assert.equal(f.simpleButton().disabled, false)
 })
@@ -467,4 +493,155 @@ test('a delayed recovery reply cannot release or restore over a newer guide', as
   assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
   assert.equal(f.clicks(), 2)
   assert.deepEqual(f.alerts, [])
+})
+
+test('settings load retries after timeout and ignores the expired response', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const options = { delaySettings: true }
+  const f = fixture(t, options)
+  const first = f.sent[0]
+  t.mock.timers.tick(5001); await tick()
+  f.reply(first); await tick()
+  assert.ok(f.controls.every(control => control.disabled()))
+  options.delaySettings = false
+  window.dispatchEvent(new Event('online')); await tick()
+  assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
+  assert.ok(f.controls.every(control => !control.disabled()))
+  assert.equal(f.guideButton().disabled, false)
+  t.mock.timers.tick(5000); await tick()
+  assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
+})
+
+test('settings load also retries automatically and stops retrying on teardown', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture(t, { delaySettings: true })
+  t.mock.timers.tick(5000); await tick()
+  t.mock.timers.tick(5000); await tick()
+  assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
+  f.cleanup(); await tick()
+  t.mock.timers.tick(20000); await tick()
+  assert.equal(f.sent.filter(m => m.type === 'settings:get').length, 2)
+})
+
+test('failed settings save retries the dirty snapshot when guiding without another edit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const backend = backendHarness()
+  let writes = 0
+  backend.api.userStorage.setJson = async () => { writes++; throw new Error('Storage unavailable') }
+  const f = fixture(t, { backend })
+  await tick()
+  f.controls[0].edit({ value: 'Retry {{input}}' })
+  t.mock.timers.tick(500); await tick()
+  let saved
+  backend.api.userStorage.setJson = async (_path, value) => { writes++; saved = value }
+  f.click(); await tick(); await tick(); await tick()
+  assert.equal(writes, 2)
+  assert.equal(saved.template, 'Retry {{input}}')
+  assert.equal('role' in saved, false)
+  assert.equal(f.clicks(), 1)
+  assert.deepEqual(f.alerts, [])
+})
+
+test('unsaved settings retry on reconnect and retain newer edits while an older save completes', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const backend = backendHarness()
+  let release
+  backend.api.userStorage.setJson = () => new Promise(resolve => { release = resolve })
+  const f = fixture(t, { backend })
+  await tick()
+  f.controls[0].edit({ value: 'First' })
+  t.mock.timers.tick(500); await tick()
+  f.controls[0].edit({ value: 'Second' })
+  release(); await tick()
+  assert.notEqual(document.querySelector('.sd-status').textContent, 'Saved.')
+  let saved
+  backend.api.userStorage.setJson = async (_path, value) => { saved = value }
+  window.dispatchEvent(new Event('online')); await tick(); await tick()
+  assert.equal(saved.template, 'Second')
+})
+
+test('Simple Send ignores broadcasts even for identical content and uses its own HTTP response', async t => {
+  const f = fixture(t, { delayQueue: true })
+  await tick(); f.simpleClick(); await tick()
+  assert.equal(window.fetch, f.nativeFetch)
+  f.idle('New draft'); await tick()
+  for (const content of ['Other message', 'Direction with $&']) {
+    f.emit('MESSAGE_SENT', { chatId: 'A', message: { id: 'another-tab', is_user: true, content } })
+    await tick()
+    assert.equal(f.simpleButton().disabled, true)
+  }
+  f.finishQueue(); await tick()
+  assert.equal(f.simpleButton().disabled, false)
+  assert.equal(f.recoverButton().hidden, true)
+  assert.equal(f.input.value, 'New draft')
+})
+
+for (const queueStatus of [500, 0]) {
+  test(`failed Simple Send (${queueStatus}) keeps text across remount and restores only on request`, async t => {
+    const f = fixture(t, { queueStatus })
+    await tick(); f.simpleClick(); await tick()
+    assert.equal(f.messages.length, 0)
+    assert.equal(f.input.value, '')
+    assert.equal(f.recoverButton().hidden, false)
+    f.reload(); await tick()
+    assert.equal(f.recoverButton().hidden, false)
+    f.recoverButton().click()
+    assert.equal(document.querySelector('.sd-draft-recovery textarea').value, 'Direction with $&')
+    document.querySelector('.sd-draft-recovery section button').click(); await tick()
+    assert.equal(f.input.value, 'Direction with $&')
+    assert.equal(f.recoverButton().hidden, true)
+    assert.equal(f.clicks(), 1)
+    assert.equal(document.querySelector('.sd-draft-recovery'), null)
+  })
+}
+
+test('Recover draft never overwrites another draft or another chat', async t => {
+  const f = fixture(t, { queueStatus: 500 })
+  await tick(); f.simpleClick(); await tick()
+  f.idle('New text'); await tick()
+  f.recoverButton().click()
+  const restore = document.querySelector('.sd-draft-recovery section button')
+  restore.click()
+  assert.equal(f.input.value, 'New text')
+  f.switchChat('B'); f.idle(''); await tick()
+  restore.click()
+  assert.equal(f.input.value, '')
+  assert.equal(f.recoverButton().hidden, true)
+  assert.equal(JSON.parse(window.sessionStorage.getItem('scene-direction:simple-send-drafts')).length, 1)
+})
+
+test('missing native save request times out and removes the temporary transport observer', async t => {
+  const f = fixture(t, { skipQueueRequest: true })
+  await tick()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  f.simpleClick(); await tick()
+  assert.notEqual(window.fetch, f.nativeFetch)
+  t.mock.timers.tick(15000); await tick()
+  assert.equal(window.fetch, f.nativeFetch)
+  assert.equal(f.recoverButton().hidden, false)
+  assert.equal(f.clicks(), 1)
+})
+
+test('storage failure prevents Simple Send from clearing or submitting the draft', async t => {
+  const f = fixture(t)
+  await tick()
+  const originalSet = window.Storage.prototype.setItem
+  window.Storage.prototype.setItem = () => { throw new Error('Storage full') }
+  f.simpleClick(); await tick()
+  window.Storage.prototype.setItem = originalSet
+  assert.equal(f.clicks(), 0)
+  assert.equal(f.input.value, 'Direction with $&')
+  assert.equal(f.alerts[0], 'Storage full')
+})
+
+test('the native switch receives its accessible name even when the host remounts it', async t => {
+  const f = fixture(t)
+  await tick()
+  const control = document.querySelector('[role="switch"]')
+  assert.equal(control.getAttribute('aria-label'), 'Clear Input After Guide')
+  const replacement = document.createElement('button')
+  replacement.setAttribute('role', 'switch')
+  control.replaceWith(replacement); await tick()
+  assert.equal(replacement.getAttribute('aria-label'), 'Clear Input After Guide')
+  f.cleanup()
 })

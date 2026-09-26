@@ -1,14 +1,12 @@
 export const DEFAULT_TEMPLATE = '[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]'
-export type Settings = { version: 2; template: string; role: 'user'; clearInput: boolean }
-export const DEFAULT_SETTINGS: Settings = { version: 2, template: DEFAULT_TEMPLATE, role: 'user', clearInput: true }
+export type Settings = { version: 2; template: string; clearInput: boolean }
+export const DEFAULT_SETTINGS: Settings = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true }
 
 export function normalizeSettings(value: unknown): Settings {
   const v = value && typeof value === 'object' ? value as Partial<Settings> : {}
   return {
     version: 2,
     template: typeof v.template === 'string' ? v.template : DEFAULT_TEMPLATE,
-    // Ignore saved role choices from earlier versions: guides are user turns.
-    role: 'user',
     clearInput: v.clearInput !== false,
   }
 }
@@ -23,7 +21,7 @@ export type Pending = { userId: string; chatId: string; sessionId: string; token
 export class PendingGuides {
   private entries = new Map<string, Pending>()
   private key(userId: string, chatId: string) { return `${userId}\u0000${chatId}` }
-  arm(entry: Pending, now = Date.now()) {
+  arm(entry: Pending) {
     const key = this.key(entry.userId, entry.chatId)
     const previous = this.entries.get(key)
     if (previous) throw new Error('A guide is already pending for this chat.')
@@ -49,7 +47,7 @@ export class PendingGuides {
     this.entries.delete(key)
     return entry
   }
-  consume(userId: string, chatId: string, sessionId: string | undefined, generationType: string, dryRun = false, now = Date.now()) {
+  consume(userId: string, chatId: string, sessionId: string | undefined, generationType: string, dryRun = false) {
     const key = this.key(userId, chatId)
     const item = this.entries.get(key)
     if (!item) return undefined

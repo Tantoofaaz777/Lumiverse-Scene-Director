@@ -4,6 +4,7 @@ import type { Settings } from './core'
 import { composer, readDraft, setDraft, waitForEmptyComposer, freshReplyButton } from './composer'
 import { mountGuideToolbar } from './toolbar'
 import { simpleSend } from './simple-send'
+import { draftRecovery } from './draft-recovery'
 
 export function setup(ctx: SpindleFrontendContext) {
   // This public mount is rendered inside Settings → Extensions and marks the
@@ -76,11 +77,25 @@ export function setup(ctx: SpindleFrontendContext) {
   root.append(style, panel);
   const template = ctx.components.mountTextArea(templateSlot, { value: DEFAULT_TEMPLATE, rows: 6, ariaLabel: "Prompt Template", disabled: true, onChange: () => scheduleSave() });
   const clear = ctx.components.mountSwitch(clearSlot, { checked: true, ariaLabel: "Clear Input After Guide", disabled: true, onChange: () => scheduleSave() });
+  // The inspected host bridge drops ariaLabel. Label the actual asynchronous
+  // control, including any replacement mounted by React, until it is fixed.
+  const labelSwitch = () => {
+    const button = clearSlot.querySelector('[role="switch"]')
+    if (button && button.getAttribute('aria-label') !== 'Clear Input After Guide') button.setAttribute('aria-label', 'Clear Input After Guide')
+  }
+  const switchObserver = new MutationObserver(labelSwitch)
+  switchObserver.observe(clearSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ['role', 'aria-label'] })
+  labelSwitch()
   let current: Settings = DEFAULT_SETTINGS
   let disposed = false
   let busy = false
   let simpleController: AbortController | undefined
   let settingsReady = false
+  let settingsLoad: Promise<void> | undefined
+  let settingsRetry: ReturnType<typeof setTimeout> | undefined
+  let settingsDirty = false
+  let settingsRevision = 0
+  let saving = 0
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let saveTail: Promise<void> = Promise.resolve()
   type Reply = { type?: string; requestId?: string; message?: string; settings?: unknown; token?: string; chatId?: string }
@@ -131,7 +146,12 @@ export function setup(ctx: SpindleFrontendContext) {
     clearTimeout(guide.recoveryTimer)
     guide.recoveryTimer = setTimeout(() => { void recover(guide) }, 5000)
   }
-  const recoverOnReturn = () => { if (active) void recover(active) }
+  const recoverOnReturn = () => {
+    if (disposed) return
+    if (active) void recover(active)
+    if (!settingsReady) void loadSettings().catch(() => {})
+    else if (settingsDirty && !saving) void persist().catch(() => {})
+  }
   const recoverOnVisible = () => { if (document.visibilityState === 'visible') recoverOnReturn() }
   window.addEventListener('online', recoverOnReturn)
   window.addEventListener('focus', recoverOnReturn)
@@ -174,18 +194,28 @@ export function setup(ctx: SpindleFrontendContext) {
   function persist(override?: Settings): Promise<void> {
     clearTimeout(saveTimer); saveTimer = undefined
     const next = override ?? snapshot()
+    const revision = settingsRevision
+    settingsDirty = true
+    saving++
     status.textContent = 'Saving…'
-    saveTail = saveTail.catch(() => {}).then(async () => {
+    const operation = saveTail.then(async () => {
       await request('settings:save', { settings: next })
       current = next
-      if (!disposed) status.textContent = 'Saved.'
+      if (revision === settingsRevision) {
+        settingsDirty = false
+        if (!disposed) status.textContent = 'Saved.'
+      }
     }).catch(error => {
       if (!disposed) status.textContent = error.message
       throw error
-    })
-    return saveTail
+    }).finally(() => { saving-- })
+    // Keep the queue usable after a failure; the dirty flag drives retries.
+    saveTail = operation.catch(() => {})
+    return operation
   }
   function scheduleSave() {
+    settingsDirty = true
+    settingsRevision++
     clearTimeout(saveTimer)
     status.textContent = 'Unsaved changes'
     saveTimer = setTimeout(() => { void persist().catch(() => {}) }, 500)
@@ -194,19 +224,34 @@ export function setup(ctx: SpindleFrontendContext) {
   reset.addEventListener('click', () => {
     const next = { ...snapshot(), template: DEFAULT_TEMPLATE }
     template.update({ value: DEFAULT_TEMPLATE })
+    settingsRevision++
     void persist(next).catch(() => {})
   })
-  const ready = request('settings:get').then(result => {
-    if (disposed) return
-    show(normalizeSettings(result.settings))
-    template.update({ disabled: false }); clear.update({ disabled: false })
-    reset.disabled = false
-    settingsReady = true
-    toolbar.refresh()
-  })
-  void ready.catch(error => { if (!disposed) status.textContent = error.message })
+  function loadSettings(): Promise<void> {
+    if (disposed || settingsReady) return Promise.resolve()
+    if (settingsLoad) return settingsLoad
+    clearTimeout(settingsRetry)
+    settingsLoad = request('settings:get').then(result => {
+      if (disposed) return
+      show(normalizeSettings(result.settings))
+      template.update({ disabled: false }); clear.update({ disabled: false })
+      reset.disabled = false
+      settingsReady = true
+      status.textContent = ''
+      toolbar.refresh()
+    }).catch(error => {
+      if (!disposed) {
+        status.textContent = error.message
+        settingsRetry = setTimeout(() => { void loadSettings().catch(() => {}) }, 5000)
+      }
+      throw error
+    }).finally(() => { settingsLoad = undefined })
+    return settingsLoad
+  }
 
-  const toolbar = mountGuideToolbar(() => { void guide() }, () => { void sendOnly() }, () => ({ ready: settingsReady, busy }))
+  const drafts = draftRecovery(ctx, () => toolbar.refresh())
+  const toolbar = mountGuideToolbar(() => { void guide() }, () => { void sendOnly() }, () => ({ ready: settingsReady, busy, drafts: drafts.count() }), () => drafts.open())
+  void loadSettings().catch(() => {})
   async function sendOnly() {
     if (busy || disposed) return
     busy = true
@@ -215,7 +260,7 @@ export function setup(ctx: SpindleFrontendContext) {
     toolbar.refresh()
     try {
       status.textContent = 'Sending your message…'
-      await simpleSend(ctx, controller.signal)
+      await simpleSend(ctx, controller.signal, drafts)
       if (!disposed && status.textContent === 'Sending your message…') status.textContent = ''
     } catch (error) {
       if (!disposed) fail(error instanceof Error ? error.message : 'Simple Send failed.')
@@ -233,9 +278,9 @@ export function setup(ctx: SpindleFrontendContext) {
     try {
       const chatId = ctx.getActiveChat().chatId
       if (!chatId) throw new Error('Open a chat before guiding a response.')
-      await ready
-      if (saveTimer) await persist()
-      else await saveTail
+      await loadSettings()
+      await saveTail
+      if (saveTimer || settingsDirty) await persist()
       if (disposed || ctx.getActiveChat().chatId !== chatId) throw new Error('The active chat changed.')
       const { input, send } = composer()
       if (!send) throw new Error('The native fresh-reply button is unavailable. Wait for the current generation to finish.')
@@ -283,7 +328,9 @@ export function setup(ctx: SpindleFrontendContext) {
     window.removeEventListener('focus', recoverOnReturn)
     document.removeEventListener('visibilitychange', recoverOnVisible)
     clearTimeout(saveTimer)
-    toolbar.destroy(); template.destroy(); clear.destroy()
+    clearTimeout(settingsRetry)
+    switchObserver.disconnect()
+    toolbar.destroy(); drafts.destroy(); template.destroy(); clear.destroy()
     root.replaceChildren(); unsubscribe()
     for (const waiter of waiting.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Extension unloaded.')) }
     waiting.clear()

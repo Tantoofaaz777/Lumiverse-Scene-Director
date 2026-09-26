@@ -1,13 +1,11 @@
 // src/core.ts
 var DEFAULT_TEMPLATE = "[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]";
-var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, role: "user", clearInput: true };
+var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true };
 function normalizeSettings(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     version: 2,
     template: typeof v.template === "string" ? v.template : DEFAULT_TEMPLATE,
-    // Ignore saved role choices from earlier versions: guides are user turns.
-    role: "user",
     clearInput: v.clearInput !== false
   };
 }
@@ -21,7 +19,7 @@ var PendingGuides = class {
   key(userId, chatId) {
     return `${userId}\0${chatId}`;
   }
-  arm(entry, now = Date.now()) {
+  arm(entry) {
     const key = this.key(entry.userId, entry.chatId);
     const previous = this.entries.get(key);
     if (previous) throw new Error("A guide is already pending for this chat.");
@@ -49,7 +47,7 @@ var PendingGuides = class {
     this.entries.delete(key);
     return entry;
   }
-  consume(userId, chatId, sessionId, generationType, dryRun = false, now = Date.now()) {
+  consume(userId, chatId, sessionId, generationType, dryRun = false) {
     const key = this.key(userId, chatId);
     const item = this.entries.get(key);
     if (!item) return void 0;

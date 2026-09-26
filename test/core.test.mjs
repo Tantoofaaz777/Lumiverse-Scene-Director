@@ -14,20 +14,20 @@ test('template substitution preserves plain text, all occurrences, and static te
 test('pending guides isolate user, chat, browser, generation type, preview and expire', () => {
   const p = new PendingGuides()
   const item = { userId: 'u', chatId: 'A', sessionId: 's', token: 't', input: 'hello', settings: DEFAULT_SETTINGS, expiresAt: 200 }
-  p.arm(item, 100)
-  assert.equal(p.consume('u', 'B', 's', 'normal', false, 101), undefined)
-  assert.equal(p.consume('other', 'A', 's', 'normal', false, 101), undefined)
-  assert.equal(p.consume('u', 'A', 'other', 'normal', false, 101), undefined)
-  assert.equal(p.consume('u', 'A', 's', 'swipe', false, 101), undefined)
-  assert.equal(p.consume('u', 'A', 's', 'normal', true, 101), undefined)
+  p.arm(item)
+  assert.equal(p.consume('u', 'B', 's', 'normal', false), undefined)
+  assert.equal(p.consume('other', 'A', 's', 'normal', false), undefined)
+  assert.equal(p.consume('u', 'A', 'other', 'normal', false), undefined)
+  assert.equal(p.consume('u', 'A', 's', 'swipe', false), undefined)
+  assert.equal(p.consume('u', 'A', 's', 'normal', true), undefined)
   p.start('u', 'A', 's', 'normal', 'generation', 101)
-  assert.equal(p.consume('u', 'A', 's', 'normal', false, 1000), item)
-  assert.equal(p.consume('u', 'A', 's', 'normal', false, 102), undefined)
+  assert.equal(p.consume('u', 'A', 's', 'normal', false), item)
+  assert.equal(p.consume('u', 'A', 's', 'normal', false), undefined)
   p.cancel('u', 'A', 'wrong'); assert.equal(p.get('u', 'A'), item)
   p.cancel('u', 'A', 't', 'wrong-session'); assert.equal(p.get('u', 'A'), item)
   p.cancel('u', 'A', 't', 's'); assert.equal(p.get('u', 'A'), undefined)
   const expired = { ...item, generationId: undefined, consumed: false }
-  p.arm(expired, 100)
+  p.arm(expired)
   assert.equal(p.start('u', 'A', 's', 'normal', 'late-generation', 201), undefined)
   assert.throws(() => p.activate(expired, DEFAULT_SETTINGS, 201), /cancelled or timed out/)
 })
@@ -35,15 +35,15 @@ test('pending guides isolate user, chat, browser, generation type, preview and e
 test('cancelled preparation cannot activate or replace a newer guide', () => {
   const p = new PendingGuides()
   const first = { userId: 'u', chatId: 'A', sessionId: 's', token: 'old', input: 'old', expiresAt: 200 }
-  p.arm(first, 100)
-  assert.throws(() => p.arm({ ...first, token: 'duplicate' }, 100), /already pending/)
+  p.arm(first)
+  assert.throws(() => p.arm({ ...first, token: 'duplicate' }), /already pending/)
   p.cancel('u', 'A', 'old', 's')
   const next = { ...first, token: 'new', input: 'new' }
-  p.arm(next, 100)
+  p.arm(next)
   assert.throws(() => p.activate(first, DEFAULT_SETTINGS, 101), /cancelled/)
   p.activate(next, DEFAULT_SETTINGS, 101)
   p.start('u', 'A', 's', 'normal', 'g', 101)
-  assert.equal(p.consume('u', 'A', 's', 'normal', false, 1000).input, 'new')
+  assert.equal(p.consume('u', 'A', 's', 'normal', false).input, 'new')
 })
 test('injection follows the last stored turn and keeps post-history instructions and prefill after it', () => {
   const old = Object.freeze([
@@ -82,10 +82,10 @@ test('rejects an ambiguous missing history boundary instead of using example or 
 })
 
 test('legacy settings migrate to user without losing template or draft preference', () => {
-  assert.equal(DEFAULT_SETTINGS.role, 'user')
-  assert.equal(normalizeSettings(undefined).role, 'user')
+  assert.equal('role' in DEFAULT_SETTINGS, false)
+  assert.equal('role' in normalizeSettings(undefined), false)
   assert.deepEqual(normalizeSettings({ template: 'Custom {{input}}', role: 'system', clearInput: false }), {
-    version: 2, template: 'Custom {{input}}', role: 'user', clearInput: false,
+    version: 2, template: 'Custom {{input}}', clearInput: false,
   })
-  assert.equal(normalizeSettings({ ...DEFAULT_SETTINGS, role: 'system' }).role, 'user')
+  assert.equal('role' in normalizeSettings({ ...DEFAULT_SETTINGS, role: 'system' }), false)
 })

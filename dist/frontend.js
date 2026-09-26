@@ -1,13 +1,11 @@
 // src/core.ts
 var DEFAULT_TEMPLATE = "[Treat the following instruction as explicit scene direction and apply it to your response:\n\n{{input}}]";
-var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, role: "user", clearInput: true };
+var DEFAULT_SETTINGS = { version: 2, template: DEFAULT_TEMPLATE, clearInput: true };
 function normalizeSettings(value) {
   const v = value && typeof value === "object" ? value : {};
   return {
     version: 2,
     template: typeof v.template === "string" ? v.template : DEFAULT_TEMPLATE,
-    // Ignore saved role choices from earlier versions: guides are user turns.
-    role: "user",
     clearInput: v.clearInput !== false
   };
 }
@@ -44,7 +42,7 @@ async function waitForEmptyComposer(input, draftLabel) {
 }
 
 // src/toolbar.ts
-function mountGuideToolbar(onClick, onSimpleSend, state) {
+function mountGuideToolbar(onClick, onSimpleSend, state, onRecover) {
   const toolbar = document.createElement("div");
   toolbar.id = "sd-guide-toolbar";
   const style = document.createElement("style");
@@ -79,7 +77,13 @@ function mountGuideToolbar(onClick, onSimpleSend, state) {
   simple.setAttribute("aria-label", "Simple Send");
   simple.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9H13"/><path d="M19 2v6m-3-3h6"/></svg>';
   simple.addEventListener("click", onSimpleSend);
-  toolbar.append(style, button, simple);
+  const recovery = document.createElement("button");
+  recovery.type = "button";
+  recovery.setAttribute("aria-label", "Recover draft");
+  recovery.title = "Recover text from an unconfirmed Simple Send";
+  recovery.textContent = "\u21B6";
+  recovery.addEventListener("click", onRecover);
+  toolbar.append(style, button, simple, recovery);
   let disposed = false;
   function refresh() {
     if (disposed) return;
@@ -97,7 +101,11 @@ function mountGuideToolbar(onClick, onSimpleSend, state) {
       return;
     }
     if (toolbar.parentElement !== area || toolbar.nextElementSibling !== row) area.insertBefore(toolbar, row);
-    const { ready, busy } = state();
+    const { ready, busy, drafts } = state();
+    if (recovery.hidden !== !drafts) recovery.hidden = !drafts;
+    const recoveryDisplay = drafts ? "inline-flex" : "none";
+    if (recovery.style.display !== recoveryDisplay) recovery.style.display = recoveryDisplay;
+    if (recovery.disabled !== busy) recovery.disabled = busy;
     const disabled = !ready || busy || !current.send || !current.input.value.trim();
     if (button.disabled !== disabled) button.disabled = disabled;
     const busyLabel = String(busy);
@@ -125,13 +133,89 @@ function mountGuideToolbar(onClick, onSimpleSend, state) {
       document.removeEventListener("input", onInput, true);
       button.removeEventListener("click", onClick);
       simple.removeEventListener("click", onSimpleSend);
+      recovery.removeEventListener("click", onRecover);
       toolbar.remove();
     }
   };
 }
 
+// src/native-save.ts
+function observeNativeSave(chatId, text, signal, dispatch) {
+  if (typeof window.fetch !== "function") return Promise.reject(new Error("The native save transport is unavailable."));
+  return new Promise((resolve, reject) => {
+    const previous = window.fetch;
+    let settled = false;
+    let captured = false;
+    let expectedContent = "";
+    let timer;
+    const detach = () => {
+      if (window.fetch === observe) window.fetch = previous;
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      detach();
+      signal.removeEventListener("abort", cancel);
+      if (error) reject(error);
+      else resolve();
+    };
+    const cancel = () => finish();
+    const uncertain = () => finish(new Error("Could not confirm Simple Send. Check the chat history before retrying. Your text is available in Recover draft."));
+    const matches = (input, init) => {
+      if (init?.method?.toUpperCase() !== "POST" || typeof init.body !== "string") return false;
+      try {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, window.location.href);
+        if (!url.pathname.endsWith(`/chats/${encodeURIComponent(chatId)}/messages`)) return false;
+        const body = JSON.parse(init.body);
+        const matching = body.is_user === true && typeof body.content === "string" && (body.content === text.trim() || body.content.startsWith(`${text.trim()}
+
+`));
+        if (matching) expectedContent = body.content;
+        return matching;
+      } catch {
+        return false;
+      }
+    };
+    const observe = (input, init) => {
+      const selected = !settled && !captured && matches(input, init);
+      if (selected) {
+        captured = true;
+        detach();
+        clearTimeout(timer);
+        timer = setTimeout(uncertain, 35e3);
+      }
+      try {
+        const response = previous.call(window, input, init);
+        if (selected) void response.then(async (result) => {
+          if (!result.ok) throw new Error(`Simple Send failed (HTTP ${result.status}).`);
+          const message = await result.clone().json();
+          if (typeof message?.id !== "string" || message.chat_id !== chatId || message.is_user !== true || message.content !== expectedContent) throw new Error("Unexpected save response.");
+          finish();
+        }).catch((error) => finish(new Error(`${error instanceof Error ? error.message : "Save connection failed."} Check history before retrying; your text is available in Recover draft.`)));
+        return response;
+      } catch (error) {
+        if (selected) uncertain();
+        throw error;
+      }
+    };
+    timer = setTimeout(uncertain, 15e3);
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) {
+      cancel();
+      return;
+    }
+    window.fetch = observe;
+    try {
+      dispatch();
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error("Simple Send failed."));
+    }
+  });
+}
+
 // src/simple-send.ts
-async function simpleSend(ctx, signal) {
+async function simpleSend(ctx, signal, drafts) {
   const chatId = ctx.getActiveChat().chatId;
   if (!chatId) throw new Error("Open a chat before sending a message.");
   const { input } = composer();
@@ -144,36 +228,112 @@ async function simpleSend(ctx, signal) {
     throw new Error("The active chat or message changed. Send again from the current input.");
   }
   if (!current.send) throw new Error("Wait for the current generation to finish.");
-  await new Promise((resolve, reject) => {
-    let unsubscribe = () => {
-    };
-    let timer;
-    const finish = (error) => {
-      clearTimeout(timer);
-      unsubscribe();
-      signal.removeEventListener("abort", cancel);
-      if (error) reject(error);
-      else resolve();
-    };
-    const cancel = () => finish();
-    try {
-      unsubscribe = ctx.events.on("MESSAGE_SENT", (raw) => {
-        const event = raw;
-        if (event?.chatId === chatId && event.message?.is_user === true) finish();
-      });
-      signal.addEventListener("abort", cancel, { once: true });
-      timer = setTimeout(() => finish(new Error("Could not confirm Simple Send. Check the chat history before retrying.")), 15e3);
-      current.send.dispatchEvent(new window.MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        ctrlKey: true,
-        metaKey: true
-      }));
-    } catch (error) {
-      finish(error instanceof Error ? error : new Error("Simple Send failed."));
-    }
+  const savedDraft = drafts.add(chatId, original);
+  await observeNativeSave(chatId, original, signal, () => {
+    current.send.dispatchEvent(new window.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      ctrlKey: true,
+      metaKey: true
+    }));
   });
+  if (!signal.aborted) drafts.remove(savedDraft);
+}
+
+// src/draft-recovery.ts
+var KEY = "scene-direction:simple-send-drafts";
+function draftRecovery(ctx, changed) {
+  let drafts = [];
+  let dialog;
+  try {
+    const stored = JSON.parse(window.sessionStorage.getItem(KEY) || "[]");
+    if (Array.isArray(stored)) drafts = stored.filter((d) => typeof d?.id === "string" && typeof d.chatId === "string" && typeof d.text === "string");
+  } catch {
+  }
+  function write(next) {
+    window.sessionStorage.setItem(KEY, JSON.stringify(next));
+    drafts = next;
+    changed();
+  }
+  function remove(id) {
+    write(drafts.filter((d) => d.id !== id));
+  }
+  function forChat() {
+    return drafts.filter((d) => d.chatId === ctx.getActiveChat().chatId);
+  }
+  function close() {
+    dialog?.remove();
+    dialog = void 0;
+  }
+  function open() {
+    close();
+    dialog = document.createElement("dialog");
+    dialog.className = "sd-draft-recovery";
+    dialog.setAttribute("aria-label", "Recover Simple Send draft");
+    dialog.style.cssText = "max-width:560px;width:85%;background:var(--lumiverse-bg,#1b1b1b);color:var(--lumiverse-text);border:1px solid var(--lumiverse-border);border-radius:12px;padding:20px;";
+    const style = document.createElement("style");
+    style.textContent = ".sd-draft-recovery button { margin:4px; padding:7px 12px; border-radius:8px; border:1px solid var(--lumiverse-border); background:var(--lumiverse-fill); color:inherit; font:inherit; cursor:pointer; } .sd-draft-recovery button:focus-visible { outline:2px solid var(--lumiverse-accent); } .sd-draft-recovery::backdrop { background:#0008; }";
+    dialog.append(style);
+    const info = document.createElement("p");
+    info.textContent = "Check the chat history before restoring an unconfirmed send. These copies contain text only; reattach files if needed.";
+    dialog.append(info);
+    for (const draft of forChat()) {
+      const entry = document.createElement("section");
+      const copy = document.createElement("textarea");
+      copy.readOnly = true;
+      copy.value = draft.text;
+      copy.rows = 4;
+      copy.setAttribute("aria-label", "Saved draft text");
+      copy.style.cssText = "box-sizing:border-box;width:100%;background:var(--lumiverse-fill);color:inherit;margin:8px 0;";
+      const restore = document.createElement("button");
+      restore.textContent = "Restore to input";
+      restore.type = "button";
+      restore.addEventListener("click", () => {
+        try {
+          if (ctx.getActiveChat().chatId !== draft.chatId || composer().input.value !== "") throw new Error("Open the original chat with an empty input before restoring. You can also copy the text above.");
+          setDraft(draft.text);
+          remove(draft.id);
+          entry.remove();
+          if (!forChat().length) close();
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : "Could not restore the draft.");
+        }
+      });
+      const discard = document.createElement("button");
+      discard.type = "button";
+      discard.textContent = "Discard copy";
+      discard.addEventListener("click", () => {
+        try {
+          remove(draft.id);
+          entry.remove();
+          if (!forChat().length) close();
+        } catch {
+          window.alert("Could not remove the saved copy.");
+        }
+      });
+      entry.append(copy, restore, discard);
+      dialog.append(entry);
+    }
+    const done = document.createElement("button");
+    done.type = "button";
+    done.textContent = "Close";
+    done.addEventListener("click", close);
+    dialog.append(done);
+    document.body.append(dialog);
+    dialog.showModal();
+  }
+  return {
+    add(chatId, text) {
+      const id = crypto.randomUUID();
+      write([...drafts, { id, chatId, text }]);
+      return id;
+    },
+    remove,
+    open,
+    count: () => forChat().length,
+    destroy: close
+  };
 }
 
 // src/frontend.ts
@@ -246,11 +406,23 @@ function setup(ctx) {
   root.append(style, panel);
   const template = ctx.components.mountTextArea(templateSlot, { value: DEFAULT_TEMPLATE, rows: 6, ariaLabel: "Prompt Template", disabled: true, onChange: () => scheduleSave() });
   const clear = ctx.components.mountSwitch(clearSlot, { checked: true, ariaLabel: "Clear Input After Guide", disabled: true, onChange: () => scheduleSave() });
+  const labelSwitch = () => {
+    const button = clearSlot.querySelector('[role="switch"]');
+    if (button && button.getAttribute("aria-label") !== "Clear Input After Guide") button.setAttribute("aria-label", "Clear Input After Guide");
+  };
+  const switchObserver = new MutationObserver(labelSwitch);
+  switchObserver.observe(clearSlot, { childList: true, subtree: true, attributes: true, attributeFilter: ["role", "aria-label"] });
+  labelSwitch();
   let current = DEFAULT_SETTINGS;
   let disposed = false;
   let busy = false;
   let simpleController;
   let settingsReady = false;
+  let settingsLoad;
+  let settingsRetry;
+  let settingsDirty = false;
+  let settingsRevision = 0;
+  let saving = 0;
   let saveTimer;
   let saveTail = Promise.resolve();
   let active;
@@ -311,7 +483,12 @@ function setup(ctx) {
     }, 5e3);
   }
   const recoverOnReturn = () => {
+    if (disposed) return;
     if (active) void recover(active);
+    if (!settingsReady) void loadSettings().catch(() => {
+    });
+    else if (settingsDirty && !saving) void persist().catch(() => {
+    });
   };
   const recoverOnVisible = () => {
     if (document.visibilityState === "visible") recoverOnReturn();
@@ -360,19 +537,30 @@ function setup(ctx) {
     clearTimeout(saveTimer);
     saveTimer = void 0;
     const next = override ?? snapshot();
+    const revision = settingsRevision;
+    settingsDirty = true;
+    saving++;
     status.textContent = "Saving\u2026";
-    saveTail = saveTail.catch(() => {
-    }).then(async () => {
+    const operation = saveTail.then(async () => {
       await request("settings:save", { settings: next });
       current = next;
-      if (!disposed) status.textContent = "Saved.";
+      if (revision === settingsRevision) {
+        settingsDirty = false;
+        if (!disposed) status.textContent = "Saved.";
+      }
     }).catch((error) => {
       if (!disposed) status.textContent = error.message;
       throw error;
+    }).finally(() => {
+      saving--;
     });
-    return saveTail;
+    saveTail = operation.catch(() => {
+    });
+    return operation;
   }
   function scheduleSave() {
+    settingsDirty = true;
+    settingsRevision++;
     clearTimeout(saveTimer);
     status.textContent = "Unsaved changes";
     saveTimer = setTimeout(() => {
@@ -384,26 +572,45 @@ function setup(ctx) {
   reset.addEventListener("click", () => {
     const next = { ...snapshot(), template: DEFAULT_TEMPLATE };
     template.update({ value: DEFAULT_TEMPLATE });
+    settingsRevision++;
     void persist(next).catch(() => {
     });
   });
-  const ready = request("settings:get").then((result) => {
-    if (disposed) return;
-    show(normalizeSettings(result.settings));
-    template.update({ disabled: false });
-    clear.update({ disabled: false });
-    reset.disabled = false;
-    settingsReady = true;
-    toolbar.refresh();
-  });
-  void ready.catch((error) => {
-    if (!disposed) status.textContent = error.message;
-  });
+  function loadSettings() {
+    if (disposed || settingsReady) return Promise.resolve();
+    if (settingsLoad) return settingsLoad;
+    clearTimeout(settingsRetry);
+    settingsLoad = request("settings:get").then((result) => {
+      if (disposed) return;
+      show(normalizeSettings(result.settings));
+      template.update({ disabled: false });
+      clear.update({ disabled: false });
+      reset.disabled = false;
+      settingsReady = true;
+      status.textContent = "";
+      toolbar.refresh();
+    }).catch((error) => {
+      if (!disposed) {
+        status.textContent = error.message;
+        settingsRetry = setTimeout(() => {
+          void loadSettings().catch(() => {
+          });
+        }, 5e3);
+      }
+      throw error;
+    }).finally(() => {
+      settingsLoad = void 0;
+    });
+    return settingsLoad;
+  }
+  const drafts = draftRecovery(ctx, () => toolbar.refresh());
   const toolbar = mountGuideToolbar(() => {
     void guide();
   }, () => {
     void sendOnly();
-  }, () => ({ ready: settingsReady, busy }));
+  }, () => ({ ready: settingsReady, busy, drafts: drafts.count() }), () => drafts.open());
+  void loadSettings().catch(() => {
+  });
   async function sendOnly() {
     if (busy || disposed) return;
     busy = true;
@@ -412,7 +619,7 @@ function setup(ctx) {
     toolbar.refresh();
     try {
       status.textContent = "Sending your message\u2026";
-      await simpleSend(ctx, controller.signal);
+      await simpleSend(ctx, controller.signal, drafts);
       if (!disposed && status.textContent === "Sending your message\u2026") status.textContent = "";
     } catch (error) {
       if (!disposed) fail(error instanceof Error ? error.message : "Simple Send failed.");
@@ -430,9 +637,9 @@ function setup(ctx) {
     try {
       const chatId = ctx.getActiveChat().chatId;
       if (!chatId) throw new Error("Open a chat before guiding a response.");
-      await ready;
-      if (saveTimer) await persist();
-      else await saveTail;
+      await loadSettings();
+      await saveTail;
+      if (saveTimer || settingsDirty) await persist();
       if (disposed || ctx.getActiveChat().chatId !== chatId) throw new Error("The active chat changed.");
       const { input, send } = composer();
       if (!send) throw new Error("The native fresh-reply button is unavailable. Wait for the current generation to finish.");
@@ -483,7 +690,10 @@ function setup(ctx) {
     window.removeEventListener("focus", recoverOnReturn);
     document.removeEventListener("visibilitychange", recoverOnVisible);
     clearTimeout(saveTimer);
+    clearTimeout(settingsRetry);
+    switchObserver.disconnect();
     toolbar.destroy();
+    drafts.destroy();
     template.destroy();
     clear.destroy();
     root.replaceChildren();
