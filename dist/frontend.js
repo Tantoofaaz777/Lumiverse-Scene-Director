@@ -281,7 +281,7 @@ function setup(ctx) {
     }
   }
   function release(guide2) {
-    clearTimeout(guide2.watchdog);
+    clearTimeout(guide2.recoveryTimer);
     if (active === guide2) {
       active = void 0;
       busy = false;
@@ -292,20 +292,45 @@ function setup(ctx) {
     status.textContent = message;
     window.alert(message);
   }
+  async function recover(guide2) {
+    if (disposed || active !== guide2 || !guide2.tracking || guide2.polling) return;
+    clearTimeout(guide2.recoveryTimer);
+    guide2.polling = true;
+    try {
+      await request("guide:status", { chatId: guide2.chatId, token: guide2.token });
+    } catch {
+    } finally {
+      guide2.polling = false;
+      if (!disposed && active === guide2) scheduleRecovery(guide2);
+    }
+  }
+  function scheduleRecovery(guide2) {
+    clearTimeout(guide2.recoveryTimer);
+    guide2.recoveryTimer = setTimeout(() => {
+      void recover(guide2);
+    }, 5e3);
+  }
+  const recoverOnReturn = () => {
+    if (active) void recover(active);
+  };
+  const recoverOnVisible = () => {
+    if (document.visibilityState === "visible") recoverOnReturn();
+  };
+  window.addEventListener("online", recoverOnReturn);
+  window.addEventListener("focus", recoverOnReturn);
+  document.addEventListener("visibilitychange", recoverOnVisible);
   const unsubscribe = ctx.onBackendMessage((raw) => {
     const msg = raw;
     if (!msg) return;
     if (active && msg.token === active.token && msg.chatId === active.chatId) {
       const guide2 = active;
       if (msg.type === "guide:started") {
+        if (!guide2.started && !guide2.clearInput) restore(guide2);
         guide2.started = true;
-        clearTimeout(guide2.watchdog);
         status.textContent = "Preparing the guided response\u2026";
-        if (!guide2.clearInput) restore(guide2);
       } else if (msg.type === "guide:consumed") {
+        if (!guide2.started && !guide2.clearInput) restore(guide2);
         guide2.started = true;
-        clearTimeout(guide2.watchdog);
-        if (!guide2.clearInput) restore(guide2);
         status.textContent = "Scene direction applied.";
       } else if (msg.type === "guide:failed") {
         restore(guide2);
@@ -423,15 +448,8 @@ function setup(ctx) {
       await request("guide:arm", { chatId, token: attempt.token, input: original });
       if (disposed || active !== attempt || ctx.getActiveChat().chatId !== chatId) throw new Error("The guide was cancelled or the active chat changed.");
       const nativeSend = freshReplyButton(input, draftLabel);
-      const selected = attempt;
-      selected.watchdog = setTimeout(() => {
-        if (active !== selected || selected.started) return;
-        void request("guide:cancel", { chatId, token: selected.token }).catch(() => {
-        });
-        restore(selected);
-        release(selected);
-        fail("The native generation did not confirm its start. Check the connection and try again.");
-      }, 16e3);
+      attempt.tracking = true;
+      scheduleRecovery(attempt);
       nativeSend.click();
       status.textContent = "Waiting for the native generation\u2026";
     } catch (error) {
@@ -457,10 +475,13 @@ function setup(ctx) {
         }
         restore(active);
       }
-      clearTimeout(active.watchdog);
+      clearTimeout(active.recoveryTimer);
     }
     disposed = true;
     simpleController?.abort();
+    window.removeEventListener("online", recoverOnReturn);
+    window.removeEventListener("focus", recoverOnReturn);
+    document.removeEventListener("visibilitychange", recoverOnVisible);
     clearTimeout(saveTimer);
     toolbar.destroy();
     template.destroy();

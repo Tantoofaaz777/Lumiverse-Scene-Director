@@ -83,6 +83,12 @@ function inject(messages, pending2) {
 var pending = new PendingGuides();
 var timers = /* @__PURE__ */ new Map();
 var settingsPath = "settings.json";
+var receipts = /* @__PURE__ */ new Map();
+var receiptKey = (userId, sessionId, chatId, token) => JSON.stringify([userId, sessionId, chatId, token]);
+function pruneReceipts() {
+  for (const [key, receipt] of receipts) if (Date.now() - receipt.at > 864e5) receipts.delete(key);
+  while (receipts.size > 256) receipts.delete(receipts.keys().next().value);
+}
 async function settings(userId) {
   return normalizeSettings(await spindle.userStorage.getJson(settingsPath, { fallback: DEFAULT_SETTINGS, userId }));
 }
@@ -98,6 +104,12 @@ function finish(entry, message) {
   if (pending.get(entry.userId, entry.chatId) !== entry) return;
   pending.cancel(entry.userId, entry.chatId, entry.token);
   clearTimer(entry);
+  receipts.set(receiptKey(entry.userId, entry.sessionId, entry.chatId, entry.token), {
+    type: message ? "guide:failed" : "guide:finished",
+    message,
+    at: Date.now()
+  });
+  pruneReceipts();
   notify(entry, message ? "guide:failed" : "guide:finished", message);
 }
 var subscriptions = [];
@@ -142,6 +154,22 @@ routed.onFrontendMessage(async (raw, userId, frontendSessionId) => {
     }
     if (!frontendSessionId) throw new Error("This Lumiverse version cannot bind a guide to the active browser session.");
     if (typeof msg.chatId !== "string" || !msg.chatId || typeof msg.token !== "string" || !msg.token) throw new Error("Invalid guide request.");
+    if (msg.type === "guide:status") {
+      pruneReceipts();
+      const identity = { chatId: msg.chatId, token: msg.token };
+      const receipt = receipts.get(receiptKey(userId, frontendSessionId, msg.chatId, msg.token));
+      if (receipt) {
+        reply(receipt.type, { ...identity, message: receipt.message });
+        return;
+      }
+      const entry2 = pending.get(userId, msg.chatId);
+      if (entry2?.sessionId === frontendSessionId && entry2.token === msg.token) {
+        reply(entry2.consumed ? "guide:consumed" : entry2.generationId ? "guide:started" : "guide:pending", identity);
+      } else {
+        reply("guide:failed", { ...identity, message: "The guide state is no longer available. Check the chat history before retrying." });
+      }
+      return;
+    }
     if (msg.type === "guide:cancel") {
       const entry2 = pending.get(userId, msg.chatId);
       if (entry2 && !entry2.generationId) {

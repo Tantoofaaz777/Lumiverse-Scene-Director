@@ -84,7 +84,7 @@ export function setup(ctx: SpindleFrontendContext) {
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let saveTail: Promise<void> = Promise.resolve()
   type Reply = { type?: string; requestId?: string; message?: string; settings?: unknown; token?: string; chatId?: string }
-  type ActiveGuide = { token: string; chatId: string; original: string; input: HTMLTextAreaElement; clearInput: boolean; started: boolean; watchdog?: ReturnType<typeof setTimeout> }
+  type ActiveGuide = { token: string; chatId: string; original: string; input: HTMLTextAreaElement; clearInput: boolean; started: boolean; tracking?: boolean; polling?: boolean; recoveryTimer?: ReturnType<typeof setTimeout> }
   let active: ActiveGuide | undefined
   const waiting = new Map<string, { resolve: (value: Reply) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   function request(type: string, data: Record<string, unknown> = {}): Promise<Reply> {
@@ -104,7 +104,7 @@ export function setup(ctx: SpindleFrontendContext) {
     } catch { /* The composer may have unmounted during navigation. */ }
   }
   function release(guide: ActiveGuide) {
-    clearTimeout(guide.watchdog)
+    clearTimeout(guide.recoveryTimer)
     if (active === guide) { active = undefined; busy = false }
     toolbar.refresh()
   }
@@ -112,20 +112,42 @@ export function setup(ctx: SpindleFrontendContext) {
     status.textContent = message
     window.alert(message)
   }
+  async function recover(guide: ActiveGuide) {
+    if (disposed || active !== guide || !guide.tracking || guide.polling) return
+    clearTimeout(guide.recoveryTimer)
+    guide.polling = true
+    try {
+      // The normal message handler processes the correlated status reply too.
+      await request('guide:status', { chatId: guide.chatId, token: guide.token })
+    } catch {
+      // A transport timeout is not a generation failure. Wait for the backend
+      // to confirm the outcome after reconnecting; never resend automatically.
+    } finally {
+      guide.polling = false
+      if (!disposed && active === guide) scheduleRecovery(guide)
+    }
+  }
+  function scheduleRecovery(guide: ActiveGuide) {
+    clearTimeout(guide.recoveryTimer)
+    guide.recoveryTimer = setTimeout(() => { void recover(guide) }, 5000)
+  }
+  const recoverOnReturn = () => { if (active) void recover(active) }
+  const recoverOnVisible = () => { if (document.visibilityState === 'visible') recoverOnReturn() }
+  window.addEventListener('online', recoverOnReturn)
+  window.addEventListener('focus', recoverOnReturn)
+  document.addEventListener('visibilitychange', recoverOnVisible)
   const unsubscribe = ctx.onBackendMessage(raw => {
     const msg = raw as Reply
     if (!msg) return
     if (active && msg.token === active.token && msg.chatId === active.chatId) {
       const guide = active
       if (msg.type === 'guide:started') {
+        if (!guide.started && !guide.clearInput) restore(guide)
         guide.started = true
-        clearTimeout(guide.watchdog)
         status.textContent = 'Preparing the guided response…'
-        if (!guide.clearInput) restore(guide)
       } else if (msg.type === 'guide:consumed') {
+        if (!guide.started && !guide.clearInput) restore(guide)
         guide.started = true
-        clearTimeout(guide.watchdog)
-        if (!guide.clearInput) restore(guide)
         status.textContent = 'Scene direction applied.'
       } else if (msg.type === 'guide:failed') {
         restore(guide); release(guide)
@@ -231,13 +253,8 @@ export function setup(ctx: SpindleFrontendContext) {
       // Read the current button again: React can replace Send with Stop while
       // waiting for the backend, or an attachment can arrive in the meantime.
       const nativeSend = freshReplyButton(input, draftLabel)
-      const selected = attempt
-      selected.watchdog = setTimeout(() => {
-        if (active !== selected || selected.started) return
-        void request('guide:cancel', { chatId, token: selected.token }).catch(() => {})
-        restore(selected); release(selected)
-        fail('The native generation did not confirm its start. Check the connection and try again.')
-      }, 16000)
+      attempt.tracking = true
+      scheduleRecovery(attempt)
       nativeSend.click()
       status.textContent = 'Waiting for the native generation…'
     } catch (error) {
@@ -258,10 +275,13 @@ export function setup(ctx: SpindleFrontendContext) {
         try { ctx.sendToBackend({ type: 'guide:cancel', chatId: active.chatId, token: active.token }) } catch {}
         restore(active)
       }
-      clearTimeout(active.watchdog)
+      clearTimeout(active.recoveryTimer)
     }
     disposed = true
     simpleController?.abort()
+    window.removeEventListener('online', recoverOnReturn)
+    window.removeEventListener('focus', recoverOnReturn)
+    document.removeEventListener('visibilitychange', recoverOnVisible)
     clearTimeout(saveTimer)
     toolbar.destroy(); template.destroy(); clear.destroy()
     root.replaceChildren(); unsubscribe()

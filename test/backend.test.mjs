@@ -3,6 +3,34 @@ import assert from 'node:assert/strict'
 import { DEFAULT_SETTINGS } from '../dist/core.js'
 import { backendHarness, arm, tick } from './backend-harness.mjs'
 
+test('status recovers terminal receipts without leaking across user, document, chat or token', async () => {
+  const h = backendHarness()
+  const status = { type: 'guide:status', requestId: 'status', chatId: 'A', token: 't' }
+  await h.receive(arm)
+  await h.receive(status)
+  assert.equal(h.replies.at(-1).payload.type, 'guide:pending')
+  h.event('GENERATION_STARTED')
+  await h.receive(status)
+  assert.equal(h.replies.at(-1).payload.type, 'guide:started')
+  await h.intercept()
+  await h.receive(status)
+  assert.equal(h.replies.at(-1).payload.type, 'guide:consumed')
+  h.event('GENERATION_ENDED', { errorMessage: 'Provider connection lost' })
+  await h.receive({ ...arm, token: 'new' })
+  await h.receive(status)
+  assert.equal(h.replies.at(-1).payload.message, 'Provider connection lost')
+  assert.equal(h.replies.at(-1).payload.requestId, 'status')
+  for (const [request, user, session] of [[status, 'other', 's'], [status, 'u', 'other'], [{ ...status, chatId: 'B' }, 'u', 's'], [{ ...status, token: 'wrong' }, 'u', 's']]) {
+    await h.receive(request, user, session)
+    assert.match(h.replies.at(-1).payload.message, /no longer available/)
+  }
+  await h.receive({ ...status, token: 'new' })
+  assert.equal(h.replies.at(-1).payload.type, 'guide:pending')
+  h.advance(86400001)
+  await h.receive(status)
+  assert.match(h.replies.at(-1).payload.message, /no longer available/)
+})
+
 test('late storage completion cannot resurrect a cancelled arm or remove its replacement', async () => {
   const h = backendHarness()
   let release

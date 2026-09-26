@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { JSDOM } from 'jsdom'
 import { setup } from '../dist/frontend.js'
 import { DEFAULT_SETTINGS } from '../dist/core.js'
-import { tick } from './backend-harness.mjs'
+import { backendHarness, tick } from './backend-harness.mjs'
 
 function fixture(t, options = {}) {
   const dom = new JSDOM('<div data-component="InputArea"><div data-test-input-row><div><textarea name="chat-message"></textarea></div><div><button aria-label="Enviar mensagem"><svg class="lucide-send"></svg></button></div></div></div><section id="settings"></section>')
@@ -28,6 +28,7 @@ function fixture(t, options = {}) {
   input.addEventListener('input', render)
   window.alert = message => alerts.push(message)
   function notify(type, message) {
+    if (options.backend && type === 'guide:started') { options.backend.event('GENERATION_STARTED'); return }
     const arm = sent.findLast(m => m.type === 'guide:arm')
     receiver({ type, token: arm.token, chatId: arm.chatId, message })
   }
@@ -79,9 +80,16 @@ function fixture(t, options = {}) {
     onBackendMessage: fn => { receiver = fn; return () => {} },
     sendToBackend: msg => {
       sent.push(msg)
+      if (options.backend) {
+        if (!options.offline) void options.backend.receive(msg)
+        return
+      }
       if ((options.delayArm && msg.type === 'guide:arm') || (options.delaySettings && msg.type === 'settings:get')) return
       queueMicrotask(() => reply(msg))
     },
+  }
+  if (options.backend) options.backend.api.sendToFrontend = payload => {
+    if (!options.offline && (!options.dropLifecycle || payload.requestId)) receiver(payload)
   }
   const cleanup = setup(ctx)
   t.after(() => { cleanup(); dom.window.close() })
@@ -336,4 +344,127 @@ test('unconfirmed Simple Send reports uncertainty without automatic retry or dup
   assert.equal(f.eventHandlers.get('MESSAGE_SENT').size, 0)
   f.idle('Another message'); await tick()
   assert.equal(f.simpleButton().disabled, false)
+})
+
+for (const outcome of ['failed', 'finished', 'stopped']) {
+  test(`reconnect recovers a lost ${outcome} event from the real backend without another generation`, async t => {
+    const backend = backendHarness()
+    const options = { backend }
+    const f = fixture(t, options)
+    await tick(); f.click(); await tick(); await tick()
+    assert.equal(f.clicks(), 1)
+    await backend.intercept()
+    options.offline = true
+    backend.event(outcome === 'stopped' ? 'GENERATION_STOPPED' : 'GENERATION_ENDED', outcome === 'failed' ? { errorMessage: 'Provider disconnected' } : {})
+    f.idle(''); await tick()
+    assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
+    options.offline = false
+    window.dispatchEvent(new Event('online')); await tick()
+    assert.equal(f.guideButton().getAttribute('aria-busy'), 'false')
+    assert.equal(f.input.value, outcome === 'finished' ? '' : 'Direction with $&')
+    assert.equal(f.alerts.length, outcome === 'finished' ? 0 : 1)
+    if (outcome !== 'finished') {
+      assert.equal(f.simpleButton().disabled, false)
+      assert.equal(f.guideButton().disabled, false)
+    }
+    assert.equal(f.clicks(), 1)
+    assert.equal(f.sent.filter(m => m.type === 'guide:arm').length, 1)
+    window.dispatchEvent(new Event('focus')); await tick()
+    assert.equal(f.sent.filter(m => m.type === 'guide:status').length, 1)
+  })
+}
+
+test('polling recovers missed start and completion, and never expires a still-running guide', async t => {
+  const backend = backendHarness()
+  const f = fixture(t, { backend, dropLifecycle: true })
+  await tick()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  f.click(); await tick()
+  for (let i = 0; i < 5; i++) { t.mock.timers.tick(5000); await tick() }
+  assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
+  assert.deepEqual(f.alerts, [])
+  await backend.intercept()
+  backend.event('GENERATION_ENDED')
+  f.idle('New draft'); await tick()
+  t.mock.timers.tick(5000); await tick()
+  assert.equal(f.guideButton().disabled, false)
+  assert.equal(f.input.value, 'New draft')
+  assert.equal(f.clicks(), 1)
+})
+
+test('transport timeouts keep recovery pending and retry after reconnect without duplicate polling', async t => {
+  const backend = backendHarness()
+  const options = { backend }
+  const f = fixture(t, options)
+  await tick()
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  f.click(); await tick(); await tick(); await backend.intercept()
+  options.offline = true
+  t.mock.timers.tick(5000); await tick()
+  window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')); await tick()
+  assert.equal(f.sent.filter(m => m.type === 'guide:status').length, 1)
+  t.mock.timers.tick(5000); await tick()
+  assert.deepEqual(f.alerts, [])
+  assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
+  backend.event('GENERATION_ENDED', { errorMessage: 'Failed offline' })
+  options.offline = false
+  t.mock.timers.tick(5000); await tick()
+  assert.equal(f.alerts[0], 'Failed offline')
+  assert.equal(f.input.value, 'Direction with $&')
+  assert.equal(f.clicks(), 1)
+})
+
+test('recovery preserves newer drafts, survives backend state loss and stops on unload', async t => {
+  const backend = backendHarness()
+  const options = { backend }
+  const f = fixture(t, options)
+  await tick(); f.click(); await tick(); await tick()
+  const restarted = backendHarness()
+  restarted.api.sendToFrontend = backend.api.sendToFrontend
+  options.backend = restarted
+  f.idle('Keep my new draft'); await tick()
+  window.dispatchEvent(new Event('focus')); await tick()
+  assert.match(f.alerts[0], /no longer available/)
+  assert.equal(f.input.value, 'Keep my new draft')
+  assert.equal(f.simpleButton().disabled, false)
+  f.click(); await tick(); await tick()
+  f.cleanup()
+  const count = f.sent.length
+  window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')); await tick()
+  assert.equal(f.sent.length, count)
+})
+
+test('repeated recovery does not restore an intentionally erased retained draft', async t => {
+  const backend = backendHarness()
+  backend.api.userStorage.getJson = async () => ({ ...DEFAULT_SETTINGS, clearInput: false })
+  const f = fixture(t, { backend })
+  await tick(); f.click(); await tick(); await tick()
+  assert.equal(f.input.value, 'Direction with $&')
+  f.input.value = ''
+  await backend.intercept()
+  window.dispatchEvent(new Event('focus')); await tick()
+  assert.equal(f.input.value, '')
+  assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
+})
+
+test('a delayed recovery reply cannot release or restore over a newer guide', async t => {
+  const backend = backendHarness()
+  const f = fixture(t, { backend })
+  await tick(); f.click(); await tick(); await tick()
+  const deliver = backend.api.sendToFrontend
+  let delayed
+  backend.api.sendToFrontend = payload => {
+    if (payload.requestId && payload.type === 'guide:started') delayed = payload
+    else deliver(payload)
+  }
+  window.dispatchEvent(new Event('focus')); await tick()
+  assert.ok(delayed)
+  await backend.intercept()
+  backend.event('GENERATION_ENDED')
+  f.idle('New guide'); await tick(); f.click(); await tick(); await tick()
+  deliver(delayed); await tick()
+  assert.equal(f.input.value, '')
+  assert.equal(f.guideButton().getAttribute('aria-busy'), 'true')
+  assert.equal(f.clicks(), 2)
+  assert.deepEqual(f.alerts, [])
 })

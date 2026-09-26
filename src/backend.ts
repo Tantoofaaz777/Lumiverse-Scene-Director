@@ -5,6 +5,14 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 const pending = new PendingGuides()
 const timers = new Map<Pending, ReturnType<typeof setTimeout>>()
 const settingsPath = 'settings.json'
+// Terminal receipts survive a lost frontend notification without rearming.
+type Receipt = { type: 'guide:failed' | 'guide:finished'; message?: string; at: number }
+const receipts = new Map<string, Receipt>()
+const receiptKey = (userId: string, sessionId: string, chatId: string, token: string) => JSON.stringify([userId, sessionId, chatId, token])
+function pruneReceipts() {
+  for (const [key, receipt] of receipts) if (Date.now() - receipt.at > 86400000) receipts.delete(key)
+  while (receipts.size > 256) receipts.delete(receipts.keys().next().value!)
+}
 async function settings(userId: string): Promise<Settings> {
   return normalizeSettings(await spindle.userStorage.getJson(settingsPath, { fallback: DEFAULT_SETTINGS, userId }))
 }
@@ -24,6 +32,10 @@ function finish(entry: Pending, message?: string) {
   if (pending.get(entry.userId, entry.chatId) !== entry) return
   pending.cancel(entry.userId, entry.chatId, entry.token)
   clearTimer(entry)
+  receipts.set(receiptKey(entry.userId, entry.sessionId, entry.chatId, entry.token), {
+    type: message ? 'guide:failed' : 'guide:finished', message, at: Date.now(),
+  })
+  pruneReceipts()
   notify(entry, message ? 'guide:failed' : 'guide:finished', message)
 }
 
@@ -66,6 +78,19 @@ routed.onFrontendMessage(async (raw: unknown, userId: string, frontendSessionId?
     }
     if (!frontendSessionId) throw new Error('This Lumiverse version cannot bind a guide to the active browser session.')
     if (typeof msg.chatId !== 'string' || !msg.chatId || typeof msg.token !== 'string' || !msg.token) throw new Error('Invalid guide request.')
+    if (msg.type === 'guide:status') {
+      pruneReceipts()
+      const identity = { chatId: msg.chatId, token: msg.token }
+      const receipt = receipts.get(receiptKey(userId, frontendSessionId, msg.chatId, msg.token))
+      if (receipt) { reply(receipt.type, { ...identity, message: receipt.message }); return }
+      const entry = pending.get(userId, msg.chatId)
+      if (entry?.sessionId === frontendSessionId && entry.token === msg.token) {
+        reply(entry.consumed ? 'guide:consumed' : entry.generationId ? 'guide:started' : 'guide:pending', identity)
+      } else {
+        reply('guide:failed', { ...identity, message: 'The guide state is no longer available. Check the chat history before retrying.' })
+      }
+      return
+    }
     if (msg.type === 'guide:cancel') {
       const entry = pending.get(userId, msg.chatId)
       // Do not strip a direction from a generation the host already accepted.
