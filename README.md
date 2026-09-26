@@ -10,7 +10,7 @@ For development, run `npm install`, `npm run build`, `npx tsc --noEmit`, and `np
 
 ## Use
 
-Open a chat, type a direction in the normal input, open **Extras**, and choose **Guide Response**. The native composer is cleared, and the host sends an empty-input normal generation. Its generated assistant turn streams and persists as usual. Open Lumiverse **Settings → Extensions** and scroll to **Scene Direction** (or use the extension's settings shortcut in the Extensions panel). Its official extension settings section offers a multiline Prompt Template, System/User injection role, Clear Input After Guide, and Reset Template. Changes persist in the extension's per-user storage. With clearing disabled, the draft is restored shortly after the native send begins; it remains a draft and is never part of this guided generation.
+Open a chat, type a direction in the normal input, open **Extras**, and choose **Guide Response**. The native composer is cleared, and the host sends an empty-input normal generation. Its generated assistant turn streams and persists as usual. Open Lumiverse **Settings → Extensions** and scroll to **Scene Direction** (or use the extension's settings shortcut in the Extensions panel). Its official extension settings section offers a multiline Prompt Template, System/User injection role, Clear Input After Guide, and Reset Template. The controls use Lumiverse's theme-aware shared form components. Changes persist in the extension's per-user storage after a short debounce. With clearing disabled, the draft is restored shortly after the native send begins; it remains a draft and is never part of this guided generation.
 
 The default template is:
 
@@ -31,7 +31,7 @@ Every `{{input}}` occurrence is replaced locally with the unmodified draft text.
 | Composer | Isolated `src/composer.ts` DOM bridge: `textarea[name="chat-message"]`, its neighboring native send button, and the `lucide-send` icon in the empty-send state |
 | Draft sync | Native textarea value setter and bubbling `input` event; wait two animation frames for React to render the fresh-reply button |
 | Transport | `ctx.sendToBackend` / `spindle.onFrontendMessage` with a request acknowledgement and browser session routing |
-| Settings | Official `ctx.ui.mount('settings_extensions')` section in Settings → Extensions; `spindle.userStorage` |
+| Settings | Official `ctx.ui.mount('settings_extensions')` section in Settings → Extensions with `ctx.components` form controls; `spindle.userStorage` |
 | Injection | `spindle.registerInterceptor`, after normal assembly, returning a named Prompt Breakdown contribution |
 
 The backend holds an instruction in memory only, keyed by authenticated user and chat, bound to the initiating frontend document, with a 15-second expiry and a random cancellation token. It consumes the instruction synchronously on the first matching `normal` non-Dry-Run interception. Regeneration, swipe, continue, impersonation, quiet calls, other chats, other users, and other browser documents do not consume it. The draft is restored on a pre-click error, and the backend entry is cancelled. The DOM bridge exists because staging has no public frontend action for a native empty send.
